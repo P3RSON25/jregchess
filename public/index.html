@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chess</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main id="menu" class="menu-screen">
+    <section class="menu-card" aria-labelledby="menu-title">
+      <p class="eyebrow">JREG CHESS</p>
+      <h1 id="menu-title">Chess</h1>
+      <p class="menu-subtitle">The material plane is only the beginning.</p>
+      <div class="menu-actions">
+        <button id="offline-button">Offline game</button>
+        <button id="create-button">Create online game</button>
+        <button id="join-button">Join online game</button>
+      </div>
+      <p class="license-note">Original Java game by Jreg Chess contributors · MIT licensed</p>
+    </section>
+  </main>
+
+  <main id="game" class="game-screen hidden">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">JREG CHESS</p>
+        <h1 id="game-title">White to move</h1>
+      </div>
+      <div class="connection-cluster">
+        <span id="mode-badge" class="mode-badge">OFFLINE</span>
+        <span id="connection-status">Local hot-seat</span>
+      </div>
+    </header>
+    <section class="game-layout">
+      <div class="board-column">
+        <div class="board-frame">
+          <div id="board" class="board" role="grid" aria-label="Chess board"></div>
+        </div>
+        <div class="board-caption">
+          <span id="board-name">Normal</span>
+          <span id="selection-status">Select a piece</span>
+        </div>
+      </div>
+      <aside class="toolbox" aria-label="Toolbox">
+        <div class="toolbox-heading">
+          <span class="eyebrow">TOOLBOX</span>
+          <span id="side-label">White's side</span>
+        </div>
+        <div id="money-label" class="money-label">White GP: 5<br>Black GP: 5</div>
+        <div class="toolbox-actions">
+          <button id="shop-button">Shop</button>
+          <button id="skill-button">Skill tree</button>
+          <button id="rules-button">Rules</button>
+          <button id="switch-button">Switch board</button>
+        </div>
+        <div class="parity-note">No check map, checkmate detector, castling, en passant, clocks, or undo exist in the Java source. This port keeps that behavior.</div>
+        <div id="multiplayer-card" class="multiplayer-card hidden">
+          <span class="eyebrow">ONLINE GAME</span>
+          <strong id="room-code">-----</strong>
+          <button id="copy-code-button">Copy join code</button>
+          <span id="players-status">Waiting for black</span>
+        </div>
+      </aside>
+    </section>
+  </main>
+
+  <div id="modal-root" class="modal-root hidden" aria-live="polite"></div>
+  <div id="toast-root" class="toast-root" aria-live="polite"></div>
+
+  <template id="shop-template">
+    <section class="window-card shop-window" role="dialog" aria-modal="true" aria-labelledby="shop-title">
+      <div class="window-heading"><h2 id="shop-title">Shop</h2><button class="close-window" aria-label="Close">×</button></div>
+      <div class="shop-grid"></div>
+    </section>
+  </template>
+  <template id="skill-template">
+    <section class="window-card skill-window" role="dialog" aria-modal="true" aria-labelledby="skill-title">
+      <div class="window-heading"><h2 id="skill-title">Skill Tree</h2><button class="close-window" aria-label="Close">×</button></div>
+      <div class="skill-grid"></div>
+    </section>
+  </template>
+  <template id="rules-template">
+    <section class="window-card rules-window" role="dialog" aria-modal="true" aria-labelledby="rules-title">
+      <div class="window-heading"><h2 id="rules-title">Rules</h2><button class="close-window" aria-label="Close">×</button></div>
+      <div class="rules-list"></div>
+    </section>
+  </template>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
