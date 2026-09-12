@@ -50,11 +50,12 @@ test("special movement and pawn rule parity", () => {
   assert.equal(game.validMove({ x: 2, y: 6 }, { x: 2, y: 2 }), true);
 });
 
-test("buying and upgrading use GP without consuming a turn", () => {
+test("buying consumes the turn while upgrading does not", () => {
   const game = new GameState({ seed: "shop" });
   assert.equal(game.buy("pawn", 3, 4), true);
   assert.equal(game.whiteGP, 3);
-  assert.equal(game.whiteToMove, true);
+  assert.equal(game.whiteToMove, false);
+  game.whiteToMove = true;
   game.whiteGP = 10;
   assert.equal(game.upgrade("centaur", 3, 4), true);
   assert.equal(game.getCell(3, 4, "Normal").type, "Centaur");

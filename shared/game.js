@@ -382,6 +382,7 @@ export class GameState {
     this.placeNew(type, this.currentColor(), x, y, "Normal");
     if (type === "Bomb") this.takeAt(x, y, null, "Normal");
     this.history.push({ type: "buy", id, x, y });
+    this.nextTurn();
     return true;
   }
   upgrade(toId, x, y) {

@@ -41,14 +41,18 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .game-layout { width: min(1080px, 100%); margin: 0 auto; display: grid; grid-template-columns: minmax(0, 1fr) 240px; gap: 24px; align-items: start; }
 .board-column { min-width: 0; }
 .board-frame { padding: 12px; background: #5f3f27; box-shadow: var(--shadow); }
-.board { width: min(100%, 720px); margin: auto; display: grid; grid-template-columns: repeat(8, 1fr); aspect-ratio: 1; }
-.tile { position: relative; border: 0; padding: 0; min-width: 0; display: grid; place-items: center; background: transparent; transition: filter .12s, box-shadow .12s; }
+.board { position: relative; width: min(100%, 720px); margin: auto; aspect-ratio: 1; overflow: hidden; }
+.board-tiles, .piece-layer { position: absolute; inset: 0; display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); grid-template-rows: repeat(8, minmax(0, 1fr)); }
+.piece-layer { z-index: 2; pointer-events: none; }
+.tile { position: relative; border: 0; padding: 0; min-width: 0; min-height: 0; width: 100%; height: 100%; display: grid; place-items: center; background: transparent; transition: filter .12s, box-shadow .12s; }
 .tile.normal-light { background: var(--normal-light); }.tile.normal-dark { background: var(--normal-dark); }
 .tile.heaven-light { background: var(--heaven-light); }.tile.heaven-dark { background: var(--heaven-dark); }
 .tile.hell-light { background: var(--hell-light); }.tile.hell-dark { background: var(--hell-dark); }
 .tile.legal { background: var(--green); }.tile.selected { background: var(--cyan); }
 .tile:hover { filter: brightness(1.1); z-index: 1; box-shadow: inset 0 0 0 3px rgba(36, 23, 15, .35); }
 .tile img { display: block; width: 92%; height: 92%; object-fit: contain; image-rendering: auto; pointer-events: none; }
+.piece-overlay { min-width: 0; min-height: 0; display: grid; overflow: hidden; }
+.piece-overlay img { display: block; width: 100%; height: 100%; min-width: 0; min-height: 0; object-fit: fill; image-rendering: auto; }
 .tile .piece-fallback { font: 700 clamp(11px, 2vw, 22px)/1 Arial, sans-serif; text-align: center; word-break: break-word; pointer-events: none; }
 .tile .piece-fallback.white { color: #fffaf0; text-shadow: 1px 1px 0 #3e2818; }.tile .piece-fallback.black { color: #23150d; }
 .board-caption { padding: 11px 2px; display: flex; justify-content: space-between; color: var(--muted); font: 12px Arial, sans-serif; }

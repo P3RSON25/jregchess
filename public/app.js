@@ -1,5 +1,5 @@
 import {
-  GameState, COLORS, RULE_DESCRIPTIONS, RULE_ICONS, RULE_PICKER, SHOP_ITEMS, UPGRADES, imageKey
+  GameState, COLORS, LARGE_SIZES, RULE_DESCRIPTIONS, RULE_ICONS, RULE_PICKER, SHOP_ITEMS, UPGRADES, imageKey
 } from "/shared/game.js";
 
 const $ = selector => document.querySelector(selector);
@@ -121,6 +121,11 @@ function render() {
   $("#room-code").textContent = room || "-----";
   renderStatus();
   boardElement.replaceChildren();
+  const tilesLayer = document.createElement("div");
+  tilesLayer.className = "board-tiles";
+  const pieceLayer = document.createElement("div");
+  pieceLayer.className = "piece-layer";
+  boardElement.append(tilesLayer, pieceLayer);
   const selectedPiece = selected && game.getCell(selected.x, selected.y, boardName);
   const legal = new Set(selectedPiece ? game.legalMoves(selected, boardName).map(position => `${position.x},${position.y}`) : []);
   const board = game.board(boardName);
@@ -133,8 +138,15 @@ function render() {
     tile.setAttribute("aria-label", `${String.fromCharCode(97 + x)}${8 - y}${board?.[y]?.[x] ? ` ${board[y][x].type}` : " empty"}`);
     tile.addEventListener("click", () => handleTile(x, y));
     const piece = board?.[y]?.[x];
-    if (piece) renderPiece(tile, piece);
-    boardElement.append(tile);
+    if (piece && !LARGE_SIZES[piece.type]) renderPiece(tile, piece);
+    tilesLayer.append(tile);
+  }
+  const renderedGroups = new Set();
+  for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) {
+    const piece = board?.[y]?.[x];
+    if (!piece || !LARGE_SIZES[piece.type] || piece.part !== 0 || renderedGroups.has(piece.group)) continue;
+    renderedGroups.add(piece.group);
+    renderLargePiece(pieceLayer, piece, board);
   }
   $("#selection-status").textContent = pendingTool ? `${pendingTool.kind === "buy" ? "Place" : "Upgrade"}: ${pendingTool.id}` : selected ? "Choose a destination" : canAct() ? "Select a piece" : "Waiting for opponent";
   renderModalState();
@@ -148,6 +160,27 @@ function renderPiece(tile, piece) {
     img.remove(); const fallback = document.createElement("span"); fallback.className = `piece-fallback ${piece.color.toLowerCase()}`; fallback.textContent = fallbackLabel(piece); tile.append(fallback);
   }, { once: true });
   tile.append(img);
+}
+
+function renderLargePiece(layer, piece, board) {
+  const [width, height] = LARGE_SIZES[piece.type];
+  const overlay = document.createElement("div");
+  overlay.className = "piece-overlay";
+  overlay.style.gridColumn = `${piece.x + 1} / span ${width}`;
+  overlay.style.gridRow = `${piece.y + 1} / span ${height}`;
+  overlay.style.gridTemplateColumns = `repeat(${width}, minmax(0, 1fr))`;
+  overlay.style.gridTemplateRows = `repeat(${height}, minmax(0, 1fr))`;
+  for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+    const part = board?.[piece.y + y]?.[piece.x + x];
+    if (!part) continue;
+    const img = document.createElement("img");
+    img.alt = `${piece.type} part ${part.part}`;
+    img.src = asset(imageKey(part));
+    img.style.gridColumn = `${x + 1}`;
+    img.style.gridRow = `${y + 1}`;
+    overlay.append(img);
+  }
+  layer.append(overlay);
 }
 
 function handleTile(x, y) {
