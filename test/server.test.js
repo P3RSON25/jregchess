@@ -27,6 +27,15 @@ test("serves the game, shared engine, assets, and health endpoint", async () => 
   assert.deepEqual(await health.json(), { ok: true, rooms: 0 });
 });
 
+test("rejects traversal while serving shared files on the deployment platform path shape", async () => {
+  const [shared, traversal] = await Promise.all([
+    fetch(`http://localhost:${PORT}/shared/game.js`),
+    fetch(`http://localhost:${PORT}/shared/../server.js`)
+  ]);
+  assert.equal(shared.status, 200);
+  assert.equal(traversal.status, 404);
+});
+
 test("two WebSocket sessions receive authoritative moves and reject out-of-turn input", async t => {
   if (typeof WebSocket === "undefined") return t.skip("This Node runtime has no built-in WebSocket client");
   const white = await openClient(); const whiteMessages = queueMessages(white);

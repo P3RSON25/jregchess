@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { createReadStream, existsSync, statSync } from "node:fs";
 import { createServer } from "node:http";
-import { extname, join, normalize } from "node:path";
+import { extname, isAbsolute, join, normalize, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { GameState, randomJoinCode } from "./shared/game.js";
 
@@ -23,12 +23,14 @@ function serveStatic(request, response) {
     response.end(JSON.stringify({ ok: true, rooms: rooms.size }));
     return;
   }
-  let relative = url.pathname === "/" ? "index.html" : decodeURIComponent(url.pathname.slice(1));
-  const isShared = relative.startsWith("shared/");
+  let requestPath = url.pathname === "/" ? "index.html" : decodeURIComponent(url.pathname.slice(1));
+  const isShared = requestPath.startsWith("shared/");
   const base = isShared ? join(ROOT, "shared") : PUBLIC;
-  if (isShared) relative = relative.slice("shared/".length);
-  const filePath = normalize(join(base, relative));
-  if (!(filePath === base || filePath.startsWith(`${base}\\`)) || !existsSync(filePath) || !statSync(filePath).isFile()) {
+  if (isShared) requestPath = requestPath.slice("shared/".length);
+  const filePath = normalize(join(base, requestPath));
+  const pathFromBase = relative(base, filePath);
+  const escapesBase = pathFromBase === ".." || pathFromBase.startsWith(`..${sep}`) || isAbsolute(pathFromBase);
+  if (escapesBase || !existsSync(filePath) || !statSync(filePath).isFile()) {
     response.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
     response.end("Not found");
     return;
@@ -220,6 +222,6 @@ const cleanup = setInterval(() => {
 }, 60 * 60 * 1000);
 cleanup.unref();
 
-server.listen(PORT, () => console.log(`Jreg Chess is running at http://localhost:${PORT}`));
+server.listen(PORT, "0.0.0.0", () => console.log(`Jreg Chess is running at http://localhost:${PORT}`));
 
 export { server, rooms };

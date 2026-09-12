@@ -31,7 +31,9 @@ Node.js 20 or newer is required. No npm packages are required.
 npm start
 ```
 
-Open `http://localhost:3000` in a browser. Set `PORT` to use another port:
+Open `http://localhost:3000` in a browser. The local server is plain HTTP, so
+do not use `https://localhost:3000` unless you have placed it behind your own
+TLS reverse proxy. Set `PORT` to use another port:
 
 ```text
 set PORT=8080
@@ -65,6 +67,8 @@ no computer chess opponent in the original source.
 The server is intended to run on a host reachable by both browsers. For a
 public deployment, place it behind HTTPS so the browser uses secure WebSocket
 connections and add the normal deployment reverse-proxy configuration.
+Railway supplies `PORT` automatically; the server listens on that value and
+on `0.0.0.0` so Railway's public proxy can reach it.
 
 ## Porting notes
 
