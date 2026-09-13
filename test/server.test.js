@@ -17,13 +17,15 @@ test.before(async () => {
 test.after(() => child?.kill());
 
 test("serves the game, shared engine, assets, and health endpoint", async () => {
-  const [index, engine, asset, health] = await Promise.all([
+  const [index, engine, asset, ruleAsset, health] = await Promise.all([
     fetch(`http://localhost:${PORT}/`), fetch(`http://localhost:${PORT}/shared/game.js`),
-    fetch(`http://localhost:${PORT}/assets/white/king.png`), fetch(`http://localhost:${PORT}/api/health`)
+    fetch(`http://localhost:${PORT}/assets/white/king.png`), fetch(`http://localhost:${PORT}/assets/rule-next-piece-explodes.svg`),
+    fetch(`http://localhost:${PORT}/api/health`)
   ]);
   assert.equal(index.status, 200); assert.match(await index.text(), /Offline game/);
   assert.equal(engine.status, 200); assert.match(await engine.text(), /class GameState/);
   assert.equal(asset.status, 200); assert.equal(asset.headers.get("content-type"), "image/png");
+  assert.equal(ruleAsset.status, 200); assert.equal(ruleAsset.headers.get("content-type"), "image/svg+xml");
   assert.deepEqual(await health.json(), { ok: true, rooms: 0 });
 });
 

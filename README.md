@@ -78,6 +78,14 @@ for the missing multiplayer content. The rule picker uses only rule pictures,
 matching the Java selection popup. The separate Rules window explains active
 rules in text.
 
+The Switch board control is a local view control, not a game action. Either
+player can cycle through every surviving board at any time, including during
+the opponent's turn, without changing turn state.
+
+Destroying Hell resolves kings immediately: both opposing king colors in Hell
+produce a draw, while a single king color produces a win for the other side.
+Purchased Kings and Super Kings are included in this resolution.
+
 ## Porting notes
 
 The port intentionally preserves source quirks instead of silently turning

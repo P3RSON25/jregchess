@@ -39,7 +39,7 @@ export const RULE_DESCRIPTIONS = {
 };
 
 export const RULE_ICONS = {
-  NEXT_PIECE_EXPLODES: "white/suicide-bomber.png", PAWNS_MOVE_FOUR: "white/pawn.png",
+  NEXT_PIECE_EXPLODES: "rule-next-piece-explodes.svg", PAWNS_MOVE_FOUR: "white/pawn.png",
   BISHOPS_GAIN_NECROMANCY: "white/necromancer.png", ZOMBIE_APOCALYPSE: "zombie.png",
   GUN: "gun.png", WILD_LIFE: "wildlife.png", WILD_HORSE: "wild-horse.png",
   MEGA_CASTLE: "white/king.png", WHIRLPOOL: "whirlpool.png", LANDMINES: "landmine.png",
@@ -393,10 +393,10 @@ export class GameState {
     this.nextTurn();
     return true;
   }
-  upgrade(toId, x, y) {
+  upgrade(toId, x, y, boardName = this.currentBoard) {
     if (this.gameOver) return this.reject("The game is over.");
     const upgrade = UPGRADES.find(entry => entry[0] === toId);
-    const piece = this.getCell(x, y, this.currentBoard);
+    const piece = this.getCell(x, y, boardName);
     if (!upgrade || !piece || piece.color !== this.currentColor() || this.funds() < 5 || !upgrade[1].includes(piece.type)) return this.reject("That piece cannot be upgraded here.");
     this.withdraw(5); const board = piece.board; this.removeGroup(piece, board);
     const type = toId === "suicide-bomber" ? "SuicideBomber" : toId === "rook-knight" ? "RookKnight" : toId === "bishop-knight" ? "BishopKnight" : toId === "knight-queen" ? "KnightQueen" : toId === "angry-rook" ? "AngryRook" : toId === "super-king" ? "SuperKing" : toId === "ball-queen" ? "BallQueen" : toId === "super-bishop" ? "SuperBishop" : toId === "rook-tower" ? "RookTower" : toId[0].toUpperCase() + toId.slice(1);
@@ -413,28 +413,28 @@ export class GameState {
   }
   reject(message) { this.emit(message); return false; }
 
-  move(from, to) {
+  move(from, to, boardName = this.currentBoard) {
     if (this.gameOver) return this.reject(this.draw ? "The game ended in a draw." : `${this.winner} has already won.`);
     if (this.rulePicker || this.pendingDecision) return this.reject("Resolve the open choice first.");
-    if (!this.validMove(from, to, this.currentBoard)) return this.reject("Illegal move.");
-    let piece = this.getCell(from.x, from.y, this.currentBoard);
+    if (!this.validMove(from, to, boardName)) return this.reject("Illegal move.");
+    let piece = this.getCell(from.x, from.y, boardName);
     if (piece.group && piece.part !== 0) {
       const leader = this.leader(piece); const offset = { x: piece.x - leader.x, y: piece.y - leader.y };
       from = { x: leader.x, y: leader.y }; to = { x: to.x - offset.x, y: to.y - offset.y }; piece = leader;
     }
     if (!piece || piece.color !== this.currentColor()) return this.reject("It is not that piece's turn.");
-    const target = this.getCell(to.x, to.y, this.currentBoard);
+    const target = this.getCell(to.x, to.y, boardName);
     const captured = target ? this.leader(target) : null;
-    const captureResult = captured ? this.takeAt(to.x, to.y, piece, this.currentBoard) : true;
+    const captureResult = captured ? this.takeAt(to.x, to.y, piece, boardName) : true;
     if (captureResult === "decision") {
-      this.pendingDecision.continuation = { from, to, pieceUid: piece.uid, capturedUid: captured.uid };
+      this.pendingDecision.continuation = { from, to, board: boardName, pieceUid: piece.uid, capturedUid: captured.uid };
       if (this.pendingDecision.advancesTurn) this.nextTurn();
       return true;
     }
     if (captureResult === false) { this.nextTurn(); return true; }
-    this.moveGroup(piece, to.x, to.y, this.currentBoard);
+    this.moveGroup(piece, to.x, to.y, boardName);
     if (piece.type === "Pawn" || piece.type === "SuicideBomber" || piece.type === "Centaur") piece.moved = true;
-    this.afterCapture(piece, captured, to, from, this.currentBoard);
+    this.afterCapture(piece, captured, to, from, boardName);
     this.nextTurn();
     return true;
   }
@@ -568,6 +568,43 @@ export class GameState {
     this.emit(`${this.winner} wins!`);
   }
 
+  drawGame(message = "Game drawn.") {
+    this.winner = null;
+    this.gameOver = true;
+    this.draw = true;
+    this.drawOffer = null;
+    this.rulePicker = false;
+    this.pendingDecision = null;
+    this.endReason = "draw";
+    this.emit(message);
+  }
+
+  kingColorsOn(boardName) {
+    const board = this.board(boardName);
+    if (!board) return new Set();
+    const colors = new Set();
+    const seen = new Set();
+    for (const row of board) for (const piece of row) {
+      if (!piece || !["King", "SuperKing"].includes(piece.type)) continue;
+      const leader = this.leader(piece);
+      const identity = leader.group || leader.uid;
+      if (seen.has(identity)) continue;
+      seen.add(identity);
+      colors.add(leader.color);
+    }
+    return colors;
+  }
+
+  destroyHell() {
+    if (!this.boards.Hell) return false;
+    const kingColors = this.kingColorsOn("Hell");
+    this.boards.Hell = null;
+    if (this.currentBoard === "Hell") this.currentBoard = "Normal";
+    if (kingColors.size > 1) this.drawGame("Both kings were in Hell. Game drawn.");
+    else if (kingColors.size === 1) this.win([...kingColors][0]);
+    return true;
+  }
+
   resign(color) {
     if (!this.online || this.gameOver) return this.reject("The game cannot be resigned.");
     this.winner = color === COLORS.WHITE ? COLORS.BLACK : COLORS.WHITE;
@@ -612,7 +649,7 @@ export class GameState {
     this.pendingDecision = null;
     if (decision.type === "atheism") {
       if (choice === "heaven") { this.boards.Heaven = null; if (this.currentBoard === "Heaven") this.currentBoard = "Normal"; }
-      else if (choice === "hell") { this.boards.Hell = null; if (this.currentBoard === "Hell") this.currentBoard = "Normal"; }
+      else if (choice === "hell") this.destroyHell();
       else if (choice === "metaphysical") for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) if (["Angel", "Devil"].includes(this.getCell(x, y, "Normal")?.type)) this.removeGroup(this.getCell(x, y, "Normal"), "Normal");
     } else if (decision.type === "angel") {
       if (choice === "yes") { const angel = this.findByUid(decision.continuation?.capturedUid); if (angel) this.removeGroup(angel, angel.board); const aggro = this.placeNew("AggroAngel", COLORS.NPC, 3, 3, "Normal"); this.automovingPieces.push(aggro); }
@@ -630,9 +667,10 @@ export class GameState {
     const piece = this.findByUid(continuation.pieceUid); if (!piece) { this.nextTurn(); return; }
     const captured = this.findByUid(continuation.capturedUid);
     if (captured) this.removeGroup(captured, captured.board);
-    this.moveGroup(piece, continuation.to.x, continuation.to.y, this.currentBoard);
+    const boardName = continuation.board || this.currentBoard;
+    this.moveGroup(piece, continuation.to.x, continuation.to.y, boardName);
     if (PAWN_TYPES.has(piece.type)) piece.moved = true;
-    this.afterCapture(piece, captured, continuation.to, continuation.from, this.currentBoard);
+    this.afterCapture(piece, captured, continuation.to, continuation.from, boardName);
     this.nextTurn();
   }
   findByUid(uid) {

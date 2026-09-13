@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { COLORS, GameState, RULE_PICKER, imageKey } from "../shared/game.js";
+import { COLORS, GameState, RULE_ICONS, RULE_PICKER, imageKey } from "../shared/game.js";
 
 test("initial setup matches the Java board and afterlife boards", () => {
   const game = new GameState({ seed: "setup" });
@@ -50,6 +50,10 @@ test("special movement and pawn rule parity", () => {
   assert.equal(imageKey(unicorn), "white/unicorn.png");
   game.addRule("PAWNS_MOVE_FOUR");
   assert.equal(game.validMove({ x: 2, y: 6 }, { x: 2, y: 2 }), true);
+});
+
+test("the explosive rule uses a dedicated two-color affected-piece sprite", () => {
+  assert.equal(RULE_ICONS.NEXT_PIECE_EXPLODES, "rule-next-piece-explodes.svg");
 });
 
 test("buying consumes the turn while upgrading does not", () => {
@@ -160,4 +164,50 @@ test("resignation and agreed draws end multiplayer games", () => {
   assert.equal(drawn.respondDraw(COLORS.BLACK, true), true);
   assert.equal(drawn.draw, true);
   assert.equal(drawn.gameOver, true);
+});
+
+test("destroying Hell resolves kings and purchased Super Kings correctly", () => {
+  const clearHell = game => {
+    for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) game.removeAt(x, y, "Hell");
+  };
+
+  const bothKings = new GameState({ online: true, seed: "hell-both" });
+  clearHell(bothKings);
+  bothKings.placeNew("King", COLORS.WHITE, 0, 0, "Hell");
+  bothKings.placeNew("King", COLORS.BLACK, 4, 0, "Hell");
+  assert.equal(bothKings.destroyHell(), true);
+  assert.equal(bothKings.draw, true);
+  assert.equal(bothKings.gameOver, true);
+  assert.equal(bothKings.winner, null);
+
+  const oneKing = new GameState({ online: true, seed: "hell-one" });
+  clearHell(oneKing);
+  oneKing.placeNew("King", COLORS.WHITE, 0, 0, "Hell");
+  assert.equal(oneKing.destroyHell(), true);
+  assert.equal(oneKing.gameOver, true);
+  assert.equal(oneKing.winner, COLORS.BLACK);
+
+  const purchasedKing = new GameState({ online: true, seed: "hell-super" });
+  clearHell(purchasedKing);
+  purchasedKing.placeNew("SuperKing", COLORS.BLACK, 0, 0, "Hell");
+  assert.equal(purchasedKing.destroyHell(), true);
+  assert.equal(purchasedKing.gameOver, true);
+  assert.equal(purchasedKing.winner, COLORS.WHITE);
+});
+
+test("moves and upgrades can target an explicit board independent of currentBoard", () => {
+  const game = new GameState({ online: true, seed: "board-view" });
+  game.currentBoard = "Normal";
+  for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) game.removeAt(x, y, "Hell");
+  game.placeNew("Rook", COLORS.WHITE, 0, 0, "Hell");
+  assert.equal(game.move({ x: 0, y: 0 }, { x: 0, y: 4 }, "Hell"), true);
+  assert.equal(game.getCell(0, 4, "Hell")?.type, "Rook");
+  assert.equal(game.currentBoard, "Normal");
+
+  game.whiteToMove = true;
+  game.whiteGP = 5;
+  game.placeNew("Knight", COLORS.WHITE, 2, 2, "Hell");
+  assert.equal(game.upgrade("unicorn", 2, 2, "Hell"), true);
+  assert.equal(game.getCell(2, 2, "Hell")?.type, "Unicorn");
+  assert.equal(game.currentBoard, "Normal");
 });

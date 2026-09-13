@@ -21,6 +21,7 @@ let connected = false;
 let lastEventId = 0;
 let eventTimer = null;
 let roomConnections = { white: false, black: false };
+let viewBoard = "Normal";
 
 function currentColor() { return game?.whiteToMove ? COLORS.WHITE : COLORS.BLACK; }
 function playerColor() { return localRole === "white" ? COLORS.WHITE : localRole === "black" ? COLORS.BLACK : null; }
@@ -35,7 +36,7 @@ function showGame() {
 }
 
 function startOffline() {
-  localRole = "offline"; room = null; token = null; connected = true; game = new GameState({ mode: "offline" }); selected = null; pendingTool = null; showGame();
+  localRole = "offline"; room = null; token = null; connected = true; viewBoard = "Normal"; game = new GameState({ mode: "offline" }); selected = null; pendingTool = null; showGame();
 }
 
 function openSocket(onOpen) {
@@ -74,6 +75,7 @@ function handleServerMessage(message) {
   if (message.type === "state") {
     room = message.room; localRole = message.role || localRole; connected = true; roomConnections = message.connected || roomConnections;
     game = GameState.fromSnapshot(message.state);
+    if (!game.board(viewBoard)) viewBoard = "Normal";
     if (message.state.lastEvent?.id > lastEventId) { lastEventId = message.state.lastEvent.id; displayEvent(message.state.lastEvent); }
     selected = null;
     render();
@@ -90,10 +92,9 @@ function sendAction(action) {
 
 function applyLocal(action) {
   let accepted = false;
-  if (action.action === "move") accepted = game.move(action.from, action.to);
+  if (action.action === "move") accepted = game.move(action.from, action.to, action.board || viewBoard);
   if (action.action === "buy") accepted = game.buy(action.id, action.x, action.y);
-  if (action.action === "upgrade") accepted = game.upgrade(action.id, action.x, action.y);
-  if (action.action === "switchBoard") accepted = game.switchBoard();
+  if (action.action === "upgrade") accepted = game.upgrade(action.id, action.x, action.y, action.board || viewBoard);
   if (action.action === "rule") accepted = game.addRule(action.rule);
   if (action.action === "decision") accepted = game.decision(action.choice);
   if (!accepted && game.lastEvent) displayEvent(game.lastEvent);
@@ -113,7 +114,8 @@ function fallbackLabel(piece) {
 
 function render() {
   if (!game) return;
-  const boardName = game.currentBoard;
+  if (!game.board(viewBoard)) viewBoard = "Normal";
+  const boardName = viewBoard;
   $("#game-title").textContent = game.draw ? "Draw" : game.gameOver ? `${game.winner} wins` : `${game.whiteToMove ? "White" : "Black"} to move`;
   $("#board-name").textContent = boardName;
   $("#side-label").textContent = localRole === "offline" ? `${game.whiteToMove ? "White" : "Black"}'s side` : localRole === "spectator" ? "Spectator" : `${localRole[0].toUpperCase() + localRole.slice(1)}'s side`;
@@ -191,7 +193,7 @@ function handleTile(x, y) {
   if (!game || game.pendingDecision || localRole === "spectator") return;
   if (game.rulePicker && canAct()) return;
   if (!canAct()) {
-    const clicked = game.getCell(x, y, game.currentBoard);
+    const clicked = game.getCell(x, y, viewBoard);
     if (!selected) {
       if (clicked) selected = { x, y };
     } else if (clicked) {
@@ -203,18 +205,29 @@ function handleTile(x, y) {
     return;
   }
   if (pendingTool?.kind === "buy") {
+    if (viewBoard !== "Normal") { toast("Shop pieces must be placed on the Normal board."); return; }
     sendAction({ action: "buy", id: pendingTool.id, x, y }); pendingTool = null; render(); return;
   }
   if (pendingTool?.kind === "upgrade") {
-    sendAction({ action: "upgrade", id: pendingTool.id, x, y }); pendingTool = null; render(); return;
+    sendAction({ action: "upgrade", id: pendingTool.id, x, y, board: viewBoard }); pendingTool = null; render(); return;
   }
-  const clicked = game.getCell(x, y, game.currentBoard);
+  const clicked = game.getCell(x, y, viewBoard);
   if (!selected) {
     if (clicked && clicked.color === currentColor()) { selected = { x, y }; render(); }
     return;
   }
   const from = selected; selected = null;
-  sendAction({ action: "move", from, to: { x, y } });
+  sendAction({ action: "move", from, to: { x, y }, board: viewBoard });
+  render();
+}
+
+function cycleViewBoard() {
+  if (!game) return;
+  const boardNames = ["Normal", "Hell", "Heaven"].filter(name => game.board(name));
+  const currentIndex = boardNames.indexOf(viewBoard);
+  viewBoard = boardNames[(currentIndex + 1) % boardNames.length] || "Normal";
+  selected = null;
+  pendingTool = null;
   render();
 }
 
@@ -343,7 +356,7 @@ $("#join-button").addEventListener("click", startJoin);
 $("#shop-button").addEventListener("click", showShop);
 $("#skill-button").addEventListener("click", showSkillTree);
 $("#rules-button").addEventListener("click", showRules);
-$("#switch-button").addEventListener("click", () => { if (canAct()) sendAction({ action: "switchBoard" }); });
+$("#switch-button").addEventListener("click", cycleViewBoard);
 $("#copy-code-button").addEventListener("click", async () => { if (room) { await navigator.clipboard?.writeText(room); toast(`Join code copied: ${room}`); } });
 $("#draw-offer-button").addEventListener("click", () => { if (isOnline() && localRole !== "spectator") sendAction({ action: "offerDraw" }); });
 $("#resign-button").addEventListener("click", () => { if (isOnline() && localRole !== "spectator" && window.confirm("Resign this game?")) sendAction({ action: "resign" }); });
