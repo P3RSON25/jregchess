@@ -144,6 +144,10 @@ export class GameState {
     this.rulePicker = false;
     this.pendingDecision = null;
     this.winner = null;
+    this.gameOver = false;
+    this.draw = false;
+    this.drawOffer = null;
+    this.endReason = null;
     this.lastEvent = null;
     this.eventId = 0;
     this.history = [];
@@ -169,10 +173,8 @@ export class GameState {
     this.placeNew("Portal", COLORS.NPC, 2, 5, "Hell");
     this.placeNew("Coin", COLORS.NPC, 7, 0, "Heaven");
     this.placeNew("Portal", COLORS.NPC, 0, 7, "Heaven");
-    if (!this.online) {
-      this.placeNew("Angel", COLORS.NPC, 1, 1, "Heaven");
-      this.placeNew("Atheism", COLORS.NPC, 5, 2, "Heaven");
-    }
+    this.placeNew("Angel", COLORS.NPC, 1, 1, "Heaven");
+    this.placeNew("Atheism", COLORS.NPC, 5, 2, "Heaven");
     this.placeNew("Church", COLORS.NPC, 6, 5, "Heaven");
   }
 
@@ -286,7 +288,7 @@ export class GameState {
     let piece = this.getCell(from.x, from.y, boardName);
     if (!piece) return false;
     const target = this.getCell(to.x, to.y, boardName);
-    if (target && target.color === piece.color) return false;
+    if (target && target.color === piece.color && target.type !== "Portal") return false;
     if (piece.group && piece.part !== 0) {
       const leader = this.leader(piece);
       const diffX = piece.x - leader.x; const diffY = piece.y - leader.y;
@@ -372,6 +374,7 @@ export class GameState {
   emit(message, icon = null) { this.lastEvent = { id: ++this.eventId, message, icon }; }
 
   buy(id, x, y) {
+    if (this.gameOver) return this.reject("The game is over.");
     const item = SHOP_ITEMS.find(entry => entry[0] === id);
     if (!item) return this.reject("Unknown shop item");
     if (this.currentBoard !== "Normal") return this.reject("Shop pieces can only be placed on the material board.");
@@ -379,13 +382,19 @@ export class GameState {
     if (this.getCell(x, y, "Normal")) return this.reject("Choose an empty square.");
     this.withdraw(item[1]);
     const type = id === "suicide-bomber" ? "SuicideBomber" : id === "rook-knight" ? "RookKnight" : id === "bishop-knight" ? "BishopKnight" : id === "knight-queen" ? "KnightQueen" : id === "angry-rook" ? "AngryRook" : id === "super-king" ? "SuperKing" : id === "ball-queen" ? "BallQueen" : id === "super-bishop" ? "SuperBishop" : id === "rook-tower" ? "RookTower" : id[0].toUpperCase() + id.slice(1);
-    this.placeNew(type, this.currentColor(), x, y, "Normal");
+    const color = NPC_TYPES.has(type) ? COLORS.NPC : this.currentColor();
+    const placed = this.placeNew(type, color, x, y, "Normal");
+    if (!placed) {
+      this.giveGold(item[1]);
+      return this.reject("That piece could not be placed.");
+    }
     if (type === "Bomb") this.takeAt(x, y, null, "Normal");
     this.history.push({ type: "buy", id, x, y });
     this.nextTurn();
     return true;
   }
   upgrade(toId, x, y) {
+    if (this.gameOver) return this.reject("The game is over.");
     const upgrade = UPGRADES.find(entry => entry[0] === toId);
     const piece = this.getCell(x, y, this.currentBoard);
     if (!upgrade || !piece || piece.color !== this.currentColor() || this.funds() < 5 || !upgrade[1].includes(piece.type)) return this.reject("That piece cannot be upgraded here.");
@@ -396,6 +405,7 @@ export class GameState {
     return true;
   }
   switchBoard() {
+    if (this.gameOver) return this.reject("The game is over.");
     if (this.currentBoard === "Normal") this.currentBoard = this.boards.Hell ? "Hell" : this.boards.Heaven ? "Heaven" : "Normal";
     else if (this.currentBoard === "Hell") this.currentBoard = this.boards.Heaven ? "Heaven" : "Normal";
     else this.currentBoard = "Normal";
@@ -404,6 +414,7 @@ export class GameState {
   reject(message) { this.emit(message); return false; }
 
   move(from, to) {
+    if (this.gameOver) return this.reject(this.draw ? "The game ended in a draw." : `${this.winner} has already won.`);
     if (this.rulePicker || this.pendingDecision) return this.reject("Resolve the open choice first.");
     if (!this.validMove(from, to, this.currentBoard)) return this.reject("Illegal move.");
     let piece = this.getCell(from.x, from.y, this.currentBoard);
@@ -546,7 +557,55 @@ export class GameState {
     for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) if (!board[y][x]) spots.push({ x, y });
     return spots.length ? spots[this.random.nextInt(spots.length)] : null;
   }
-  win(color) { this.winner = color === COLORS.WHITE ? "Black" : "White"; this.emit(`${this.winner} wins!`); }
+  win(color) {
+    this.winner = color === COLORS.WHITE ? "Black" : "White";
+    this.gameOver = true;
+    this.draw = false;
+    this.drawOffer = null;
+    this.rulePicker = false;
+    this.pendingDecision = null;
+    this.endReason = "king-death";
+    this.emit(`${this.winner} wins!`);
+  }
+
+  resign(color) {
+    if (!this.online || this.gameOver) return this.reject("The game cannot be resigned.");
+    this.winner = color === COLORS.WHITE ? COLORS.BLACK : COLORS.WHITE;
+    this.gameOver = true;
+    this.draw = false;
+    this.drawOffer = null;
+    this.rulePicker = false;
+    this.pendingDecision = null;
+    this.endReason = "resignation";
+    this.emit(`${color} resigns. ${this.winner} wins!`);
+    return true;
+  }
+
+  offerDraw(color) {
+    if (!this.online || this.gameOver) return this.reject("The game cannot accept a draw offer.");
+    if (this.drawOffer) return this.reject("A draw offer is already pending.");
+    this.drawOffer = color;
+    this.emit(`${color} offered a draw.`);
+    return true;
+  }
+
+  respondDraw(color, accept) {
+    if (!this.online || this.gameOver || !this.drawOffer || this.drawOffer === color) return this.reject("There is no draw offer for this player.");
+    const offeredBy = this.drawOffer;
+    this.drawOffer = null;
+    if (accept) {
+      this.gameOver = true;
+      this.draw = true;
+      this.winner = null;
+      this.rulePicker = false;
+      this.pendingDecision = null;
+      this.endReason = "agreement";
+      this.emit("Game drawn by agreement.");
+    } else {
+      this.emit(`${color} declined the draw offer from ${offeredBy}.`);
+    }
+    return true;
+  }
 
   decision(choice) {
     const decision = this.pendingDecision; if (!decision) return this.reject("No decision is pending.");
@@ -582,6 +641,7 @@ export class GameState {
   }
 
   addRule(rule) {
+    if (this.gameOver) return this.reject("The game is over.");
     if (!RULES.includes(rule)) return this.reject("Unknown rule.");
     this.rulePicker = false; this.turnsSinceNewRule = 0;
     switch (rule) {
@@ -610,9 +670,10 @@ export class GameState {
     for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) { const p = this.getCell(x, y, "Normal"); if (p && types.has(p.type)) { const color = p.color; this.removeGroup(p, "Normal"); this.placeNew(replacement, color, x, y, "Normal"); } }
   }
   nextTurn() {
+    if (this.gameOver) return;
     this.whiteToMove = !this.whiteToMove; this.turnsSinceNewRule++;
     for (const piece of [...this.automovingPieces]) this.automove(piece);
-    if (!this.online && this.turnsSinceNewRule >= this.rules.length * 2 && this.availableRules.length) { this.rulePicker = true; this.turnsSinceNewRule = 0; }
+    if (this.turnsSinceNewRule >= this.rules.length * 2 && this.availableRules.length) { this.rulePicker = true; this.turnsSinceNewRule = 0; }
   }
   automove(piece) {
     const current = this.findByUid(piece.uid); if (!current || current.board !== "Normal") return;
@@ -654,12 +715,12 @@ export class GameState {
       const board = this.board(boardName); if (!board) return null;
       return board.map(row => row.map(piece => piece ? { uid: piece.uid, type: piece.type, color: piece.color, part: piece.part, group: piece.group, x: piece.x, y: piece.y, health: piece.health, moved: piece.moved, movingRight: piece.movingRight, portalTo: piece.portalTo, board: piece.board } : null));
     };
-    return { online: this.online, mode: this.mode, currentBoard: this.currentBoard, whiteToMove: this.whiteToMove, whiteGP: this.whiteGP, blackGP: this.blackGP, rules: [...this.rules], availableRules: [...this.availableRules], rulePicker: this.rulePicker, pendingDecision: this.pendingDecision ? { type: this.pendingDecision.type, title: this.pendingDecision.title, color: this.pendingDecision.color, advancesTurn: this.pendingDecision.advancesTurn, continuation: this.pendingDecision.continuation } : null, winner: this.winner, lastEvent: this.lastEvent, automovingUids: this.automovingPieces.map(piece => piece.uid), boards: { Normal: serialize("Normal"), Heaven: serialize("Heaven"), Hell: serialize("Hell") }, history: this.history.slice(-100) };
+    return { online: this.online, mode: this.mode, currentBoard: this.currentBoard, whiteToMove: this.whiteToMove, whiteGP: this.whiteGP, blackGP: this.blackGP, rules: [...this.rules], availableRules: [...this.availableRules], rulePicker: this.rulePicker, pendingDecision: this.pendingDecision ? { type: this.pendingDecision.type, title: this.pendingDecision.title, color: this.pendingDecision.color, advancesTurn: this.pendingDecision.advancesTurn, continuation: this.pendingDecision.continuation } : null, winner: this.winner, gameOver: this.gameOver, draw: this.draw, drawOffer: this.drawOffer, endReason: this.endReason, lastEvent: this.lastEvent, automovingUids: this.automovingPieces.map(piece => piece.uid), boards: { Normal: serialize("Normal"), Heaven: serialize("Heaven"), Hell: serialize("Hell") }, history: this.history.slice(-100) };
   }
 
   static fromSnapshot(snapshot) {
     const game = Object.create(GameState.prototype);
-    Object.assign(game, { online: snapshot.online, mode: snapshot.mode, currentBoard: snapshot.currentBoard, whiteToMove: snapshot.whiteToMove, whiteGP: snapshot.whiteGP, blackGP: snapshot.blackGP, rules: [...snapshot.rules], availableRules: [...(snapshot.availableRules || RULE_PICKER)], rulePicker: snapshot.rulePicker, pendingDecision: snapshot.pendingDecision, winner: snapshot.winner, lastEvent: snapshot.lastEvent, eventId: snapshot.lastEvent?.id || 0, history: snapshot.history || [], automovingPieces: [], nextUid: 1, nextGroup: 1, turnsSinceNewRule: 0, _exploding: false, boards: { Normal: blankBoard(), Heaven: blankBoard(), Hell: blankBoard() }, random: new JavaRandom(1n) });
+    Object.assign(game, { online: snapshot.online, mode: snapshot.mode, currentBoard: snapshot.currentBoard, whiteToMove: snapshot.whiteToMove, whiteGP: snapshot.whiteGP, blackGP: snapshot.blackGP, rules: [...snapshot.rules], availableRules: [...(snapshot.availableRules || RULE_PICKER)], rulePicker: snapshot.rulePicker, pendingDecision: snapshot.pendingDecision, winner: snapshot.winner, gameOver: Boolean(snapshot.gameOver), draw: Boolean(snapshot.draw), drawOffer: snapshot.drawOffer || null, endReason: snapshot.endReason || null, lastEvent: snapshot.lastEvent, eventId: snapshot.lastEvent?.id || 0, history: snapshot.history || [], automovingPieces: [], nextUid: 1, nextGroup: 1, turnsSinceNewRule: 0, _exploding: false, boards: { Normal: blankBoard(), Heaven: blankBoard(), Hell: blankBoard() }, random: new JavaRandom(1n) });
     for (const boardName of BOARD_NAMES) {
       const rows = snapshot.boards[boardName]; if (!rows) { game.boards[boardName] = null; continue; }
       for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) { const piece = rows[y][x]; if (piece) { game.boards[boardName][y][x] = { ...piece }; game.nextUid = Math.max(game.nextUid, piece.uid + 1); game.nextGroup = Math.max(game.nextGroup, Number(String(piece.group || "g0").slice(1)) + 1); } }
@@ -684,6 +745,7 @@ export function imageKey(piece) {
     return `${base}${piece.part}.png`;
   }
   if (piece.type === "WildHorse") return "wild-horse.png";
+  if (NPC_TYPES.has(piece.type)) return `${rootName}.png`;
   if (piece.color === COLORS.WHITE || piece.color === COLORS.BLACK) return `${piece.color.toLowerCase()}/${rootName}.png`;
   return `${rootName}.png`;
 }

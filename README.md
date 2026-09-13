@@ -10,8 +10,8 @@ behavioral reference.
 - `server.js` serves the static frontend and implements a small WebSocket
   server with authoritative rooms.
 - `public/index.html`, `public/styles.css`, and `public/app.js` implement the
-  menu, board, Toolbox, Shop, Skill Tree, Rules window, rule picker, waiting
-  state, and special-piece dialogs.
+  menu, board, Toolbox, Shop, Skill Tree, Rules window, icon-only rule picker,
+  and special-piece dialogs.
 - `public/assets` contains the original PNG resources copied from the Java
   repository without modification.
 
@@ -60,7 +60,8 @@ no computer chess opponent in the original source.
 2. Share the five-letter code shown in the Toolbox.
 3. Player 2 chooses **Join online game** and enters the code.
 4. Both clients receive the same authoritative state. Only the player whose
-   color is to move can submit an action.
+   color is to move can submit a move, purchase, upgrade, board switch, or
+   rule choice. Either player can offer a draw or resign.
 5. A refresh on the same room URL resumes the player when that browser still
    has its reconnect token. A third connection becomes a spectator.
 
@@ -70,12 +71,21 @@ connections and add the normal deployment reverse-proxy configuration.
 Railway supplies `PORT` automatically; the server listens on that value and
 on `0.0.0.0` so Railway's public proxy can reach it.
 
+Browser multiplayer includes the Angel and Atheism pieces on Heaven so their
+large images and interaction dialogs are available to both players. The
+original Java online setup omitted them; this is an intentional web-port fix
+for the missing multiplayer content. The rule picker uses only rule pictures,
+matching the Java selection popup. The separate Rules window explains active
+rules in text.
+
 ## Porting notes
 
 The port intentionally preserves source quirks instead of silently turning
 the game into standard chess. In particular, the Java code has no check,
 checkmate, stalemate, repetition, fifty-move, insufficient-material, clock,
-resign, undo, or AI system. Kings can move into attack and can be captured;
+undo, or AI system. Multiplayer resignation and agreed draws are web transport
+features added because the browser version requires them. Kings can move into
+attack and can be captured;
 the source's win condition is the King/SuperKing death behavior.
 
 The Java enum includes `GUN`, `TREADMILL_BOARD`, `MEGA_CASTLE`, and `POTIONS`,

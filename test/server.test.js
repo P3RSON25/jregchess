@@ -66,6 +66,59 @@ test("two WebSocket sessions receive authoritative moves and reject out-of-turn 
   white.close(); black.close();
 });
 
+test("multiplayer supports online rule selection, draw agreement, and resignation", async t => {
+  if (typeof WebSocket === "undefined") return t.skip("This Node runtime has no built-in WebSocket client");
+
+  const white = await openClient();
+  const whiteMessages = queueMessages(white);
+  white.send(JSON.stringify({ type: "create" }));
+  const created = await whiteMessages.next(message => message.type === "joined");
+  await whiteMessages.next(message => message.type === "state");
+
+  const black = await openClient();
+  const blackMessages = queueMessages(black);
+  black.send(JSON.stringify({ type: "join", room: created.room }));
+  await blackMessages.next(message => message.type === "joined");
+  await blackMessages.next(message => message.type === "state");
+  await whiteMessages.next(message => message.type === "state" && message.connected.black);
+
+  const moves = [
+    [white, whiteMessages, { x: 0, y: 6 }, { x: 0, y: 5 }],
+    [black, blackMessages, { x: 0, y: 1 }, { x: 0, y: 2 }],
+    [white, whiteMessages, { x: 1, y: 6 }, { x: 1, y: 5 }],
+    [black, blackMessages, { x: 1, y: 1 }, { x: 1, y: 2 }]
+  ];
+  for (const [client, messages, from, to] of moves) {
+    client.send(JSON.stringify({ type: "action", action: "move", from, to }));
+    await messages.next(message => message.type === "state");
+  }
+  const picker = await whiteMessages.next(message => message.type === "state" && message.state.rulePicker);
+  assert.equal(picker.state.boards.Heaven[1][1].type, "Angel");
+  assert.equal(picker.state.boards.Heaven[2][5].type, "Atheism");
+
+  white.send(JSON.stringify({ type: "action", action: "rule", rule: "WILD_HORSE" }));
+  const ruleState = await blackMessages.next(message => message.type === "state" && message.state.rules.includes("WILD_HORSE"));
+  assert.equal(ruleState.state.boards.Normal[3][4].type, "WildHorse");
+
+  white.send(JSON.stringify({ type: "action", action: "offerDraw" }));
+  const offer = await blackMessages.next(message => message.type === "state" && message.state.drawOffer === "White");
+  assert.equal(offer.state.drawOffer, "White");
+  black.send(JSON.stringify({ type: "action", action: "respondDraw", accept: true }));
+  const draw = await whiteMessages.next(message => message.type === "state" && message.state.draw);
+  assert.equal(draw.state.gameOver, true);
+
+  const resignWhite = await openClient();
+  const resignMessages = queueMessages(resignWhite);
+  resignWhite.send(JSON.stringify({ type: "create" }));
+  await resignMessages.next(message => message.type === "joined");
+  await resignMessages.next(message => message.type === "state");
+  resignWhite.send(JSON.stringify({ type: "action", action: "resign" }));
+  const resigned = await resignMessages.next(message => message.type === "state" && message.state.endReason === "resignation");
+  assert.equal(resigned.state.winner, "Black");
+
+  white.close(); black.close(); resignWhite.close();
+});
+
 function openClient() {
   return new Promise((resolve, reject) => {
     const socket = new WebSocket(`ws://localhost:${PORT}/ws`);

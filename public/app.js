@@ -114,11 +114,13 @@ function fallbackLabel(piece) {
 function render() {
   if (!game) return;
   const boardName = game.currentBoard;
-  $("#game-title").textContent = `${game.whiteToMove ? "White" : "Black"} to move`;
+  $("#game-title").textContent = game.draw ? "Draw" : game.gameOver ? `${game.winner} wins` : `${game.whiteToMove ? "White" : "Black"} to move`;
   $("#board-name").textContent = boardName;
   $("#side-label").textContent = localRole === "offline" ? `${game.whiteToMove ? "White" : "Black"}'s side` : localRole === "spectator" ? "Spectator" : `${localRole[0].toUpperCase() + localRole.slice(1)}'s side`;
   $("#money-label").innerHTML = `White GP: ${game.whiteGP}<br>Black GP: ${game.blackGP}`;
   $("#room-code").textContent = room || "-----";
+  $("#draw-offer-button").disabled = !isOnline() || localRole === "spectator" || game.gameOver || Boolean(game.drawOffer);
+  $("#resign-button").disabled = !isOnline() || localRole === "spectator" || game.gameOver;
   renderStatus();
   boardElement.replaceChildren();
   const tilesLayer = document.createElement("div");
@@ -148,7 +150,7 @@ function render() {
     renderedGroups.add(piece.group);
     renderLargePiece(pieceLayer, piece, board);
   }
-  $("#selection-status").textContent = pendingTool ? `${pendingTool.kind === "buy" ? "Place" : "Upgrade"}: ${pendingTool.id}` : selected ? "Choose a destination" : canAct() ? "Select a piece" : "Waiting for opponent";
+  $("#selection-status").textContent = pendingTool ? `${pendingTool.kind === "buy" ? "Place" : "Upgrade"}: ${pendingTool.id}` : selected ? (canAct() ? "Choose a destination" : "Analyzing position") : canAct() ? "Select a piece" : "Waiting for opponent";
   renderModalState();
 }
 
@@ -168,23 +170,38 @@ function renderLargePiece(layer, piece, board) {
   overlay.className = "piece-overlay";
   overlay.style.gridColumn = `${piece.x + 1} / span ${width}`;
   overlay.style.gridRow = `${piece.y + 1} / span ${height}`;
-  overlay.style.gridTemplateColumns = `repeat(${width}, minmax(0, 1fr))`;
-  overlay.style.gridTemplateRows = `repeat(${height}, minmax(0, 1fr))`;
+  const canvas = document.createElement("canvas");
+  canvas.className = "piece-composite";
+  canvas.width = width * 64;
+  canvas.height = height * 64;
+  canvas.setAttribute("aria-label", piece.type);
+  const context = canvas.getContext("2d");
   for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
     const part = board?.[piece.y + y]?.[piece.x + x];
     if (!part) continue;
-    const img = document.createElement("img");
-    img.alt = `${piece.type} part ${part.part}`;
+    const img = new Image();
+    img.onload = () => context.drawImage(img, x * 64, y * 64, 64, 64);
     img.src = asset(imageKey(part));
-    img.style.gridColumn = `${x + 1}`;
-    img.style.gridRow = `${y + 1}`;
-    overlay.append(img);
   }
+  overlay.append(canvas);
   layer.append(overlay);
 }
 
 function handleTile(x, y) {
-  if (!game || !canAct() || game.pendingDecision || game.rulePicker || localRole === "spectator") return;
+  if (!game || game.pendingDecision || localRole === "spectator") return;
+  if (game.rulePicker && canAct()) return;
+  if (!canAct()) {
+    const clicked = game.getCell(x, y, game.currentBoard);
+    if (!selected) {
+      if (clicked) selected = { x, y };
+    } else if (clicked) {
+      selected = { x, y };
+    } else {
+      selected = null;
+    }
+    render();
+    return;
+  }
   if (pendingTool?.kind === "buy") {
     sendAction({ action: "buy", id: pendingTool.id, x, y }); pendingTool = null; render(); return;
   }
@@ -208,7 +225,8 @@ function renderStatus() {
   else status.textContent = localRole === "spectator" ? "Spectating" : `Player ${localRole}`;
   if (room && game) {
     const players = $("#players-status");
-    players.textContent = `White ${roomConnections.white ? "connected" : "away"} · Black ${roomConnections.black ? "connected" : "away"}`;
+    const drawState = game.drawOffer ? ` · Draw offered by ${game.drawOffer}` : "";
+    players.textContent = `White ${roomConnections.white ? "connected" : "away"} - Black ${roomConnections.black ? "connected" : "away"}${drawState}`;
   }
 }
 
@@ -238,7 +256,7 @@ function showSkillTree() {
     const grid = card.querySelector(".skill-grid");
     for (const [id, from] of UPGRADES) {
       const button = document.createElement("button"); button.className = "upgrade"; button.title = `${id}: ${from.join(" + ")}`;
-      const img = document.createElement("img"); img.src = asset(`white/${id}.png`); img.alt = id; button.append(img, Object.assign(document.createElement("span"), { textContent: id }));
+      const img = document.createElement("img"); img.src = asset(`white/${id}.png`); img.alt = id; button.append(img);
       button.addEventListener("click", () => { pendingTool = { kind: "upgrade", id }; closeModal(); render(); }); grid.append(button);
     }
     for (const label of ["Each", "Costs", "5GP"]) grid.append(Object.assign(document.createElement("div"), { className: "grid-label", textContent: label }));
@@ -259,8 +277,8 @@ function showRulePicker() {
   const card = document.createElement("section"); card.className = "window-card rule-picker-card"; card.innerHTML = `<div class="window-heading"><h2>Pick a rule</h2></div><div class="rule-picker-grid"></div>`; modalRoot.append(card);
   const grid = card.querySelector(".rule-picker-grid");
   for (const rule of (game.availableRules || RULE_PICKER)) {
-    const button = document.createElement("button"); button.className = "rule-option"; button.title = RULE_DESCRIPTIONS[rule] || rule;
-    const img = document.createElement("img"); img.src = asset(RULE_ICONS[rule] || "placeholder.png"); img.alt = rule; button.append(img, Object.assign(document.createElement("span"), { textContent: RULE_DESCRIPTIONS[rule] || rule }));
+    const button = document.createElement("button"); button.className = "rule-option"; button.title = RULE_DESCRIPTIONS[rule] || rule; button.setAttribute("aria-label", RULE_DESCRIPTIONS[rule] || rule);
+     const img = document.createElement("img"); img.src = asset(RULE_ICONS[rule] || "placeholder.png"); img.alt = rule; button.append(img);
     button.addEventListener("click", () => { closeModal(); sendAction({ action: "rule", rule }); }); grid.append(button);
   }
 }
@@ -283,23 +301,29 @@ function showDecision(decision) {
 
 function renderModalState() {
   if (!game || localRole === "spectator") return;
-  if (game.rulePicker && modalRoot.classList.contains("hidden")) return showRulePicker();
+  if (game.rulePicker && modalRoot.classList.contains("hidden")) {
+    if (!isOnline() || canAct()) return showRulePicker();
+    return;
+  }
   if (game.pendingDecision) {
     if (modalRoot.classList.contains("hidden")) {
       if (!isOnline() || game.pendingDecision.color === playerColor()) showDecision(game.pendingDecision);
-      else showWaiting();
     }
     return;
   }
-  if (isOnline() && localRole !== "spectator" && !canAct() && modalRoot.classList.contains("hidden")) return showWaiting();
-  if (modalRoot.dataset.kind === "waiting") closeModal();
+  if (game.drawOffer && game.drawOffer !== playerColor() && modalRoot.classList.contains("hidden")) return showDrawOffer();
+  if (modalRoot.dataset.kind === "draw" && !game.drawOffer) closeModal();
 }
 
-function showWaiting() {
-  modalRoot.replaceChildren(); modalRoot.classList.remove("hidden"); modalRoot.dataset.kind = "waiting";
-  const card = document.createElement("section"); card.className = "window-card decision-card waiting-card";
-  card.innerHTML = `<p class="eyebrow">ONLINE GAME</p><h2>Waiting</h2><p>Waiting for other player to move...</p>`;
+function showDrawOffer() {
+  modalRoot.replaceChildren(); modalRoot.classList.remove("hidden"); modalRoot.dataset.kind = "draw";
+  const card = document.createElement("section"); card.className = "window-card decision-card";
+  card.innerHTML = `<h2>Draw offered</h2><p>${game.drawOffer} offered a draw.</p><div class="decision-actions"></div>`;
   modalRoot.append(card);
+  const actions = card.querySelector(".decision-actions");
+  for (const [choice, label] of [[true, "Accept draw"], [false, "Decline draw"]]) {
+    const button = document.createElement("button"); button.textContent = label; button.addEventListener("click", () => { closeModal(); sendAction({ action: "respondDraw", accept: choice }); }); actions.append(button);
+  }
 }
 
 function displayEvent(event) {
@@ -321,6 +345,8 @@ $("#skill-button").addEventListener("click", showSkillTree);
 $("#rules-button").addEventListener("click", showRules);
 $("#switch-button").addEventListener("click", () => { if (canAct()) sendAction({ action: "switchBoard" }); });
 $("#copy-code-button").addEventListener("click", async () => { if (room) { await navigator.clipboard?.writeText(room); toast(`Join code copied: ${room}`); } });
+$("#draw-offer-button").addEventListener("click", () => { if (isOnline() && localRole !== "spectator") sendAction({ action: "offerDraw" }); });
+$("#resign-button").addEventListener("click", () => { if (isOnline() && localRole !== "spectator" && window.confirm("Resign this game?")) sendAction({ action: "resign" }); });
 
 const resumeRoom = new URLSearchParams(location.search).get("room")?.trim().toLowerCase();
 if (resumeRoom) {

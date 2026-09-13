@@ -167,9 +167,10 @@ function handleAction(peer, message) {
   const game = room.game;
   const actorColor = colorForRole(peer.role);
   const waitingDecision = game.pendingDecision;
+  const turnIndependent = ["resign", "offerDraw", "respondDraw"].includes(message.action);
   if (message.action === "decision") {
     if (!waitingDecision || waitingDecision.color !== actorColor) return peer.send({ type: "error", message: "That choice belongs to the other player." });
-  } else if (actorColor !== game.currentColor()) {
+  } else if (!turnIndependent && actorColor !== game.currentColor()) {
     return peer.send({ type: "error", message: "Wait for your turn." });
   }
   let accepted = false;
@@ -181,6 +182,9 @@ function handleAction(peer, message) {
     case "switchBoard": accepted = game.switchBoard(); break;
     case "rule": accepted = game.rulePicker && game.availableRules.includes(message.rule) ? game.addRule(message.rule) : game.reject("No rule may be selected now."); break;
     case "decision": accepted = game.decision(message.choice); break;
+    case "resign": accepted = game.resign(actorColor); break;
+    case "offerDraw": accepted = game.offerDraw(actorColor); break;
+    case "respondDraw": accepted = game.respondDraw(actorColor, message.accept === true); break;
     default: game.reject("Unknown action.");
   }
   if (!accepted) peer.send({ type: "error", message: game.lastEvent?.message || "Action rejected." });

@@ -13,10 +13,12 @@ test("initial setup matches the Java board and afterlife boards", () => {
   assert.deepEqual(game.rules, ["KING_DIES_IN_HELL", "SUICIDE_BOMBER_HEAVEN"]);
 });
 
-test("online setup omits Angel and Atheism like the Java client", () => {
+test("online setup includes Angel and Atheism for browser multiplayer", () => {
   const game = new GameState({ online: true, seed: "abcde" });
-  assert.equal(game.getCell(1, 1, "Heaven"), null);
-  assert.equal(game.getCell(5, 2, "Heaven"), null);
+  assert.equal(game.getCell(1, 1, "Heaven").type, "Angel");
+  assert.equal(game.getCell(5, 2, "Heaven").type, "Atheism");
+  assert.equal(game.getCell(3, 3, "Heaven").type, "Angel");
+  assert.equal(game.getCell(6, 3, "Heaven").type, "Atheism");
   assert.equal(game.getCell(6, 5, "Heaven").type, "Church");
 });
 
@@ -75,6 +77,16 @@ test("rule events and rule picker preserve source behavior", () => {
   assert.equal(game.availableRules.length, RULE_PICKER.length - 2);
 });
 
+test("online turns open the rule picker and spawn selected rules", () => {
+  const game = new GameState({ online: true, seed: "online-rules" });
+  for (let i = 0; i < 4; i++) game.nextTurn();
+  assert.equal(game.rulePicker, true);
+  assert.equal(game.addRule("WILD_HORSE"), true);
+  assert.equal(game.rulePicker, false);
+  assert.equal(game.rules.includes("WILD_HORSE"), true);
+  assert.equal(game.getCell(4, 3, "Normal")?.type, "WildHorse");
+});
+
 test("snapshots round-trip board state and automovers", () => {
   const game = new GameState({ seed: "snapshot" });
   game.addRule("WILD_HORSE");
@@ -91,14 +103,14 @@ test("captures preserve the special death systems", () => {
   assert.equal(game.takeAt(0, 3, game.getCell(0, 6, "Normal"), "Normal"), false);
   assert.equal(game.getCell(0, 3, "Normal"), null);
 
-  game.removeAt(3, 3, "Normal");
-  const bomber = game.placeNew("SuicideBomber", COLORS.WHITE, 3, 3, "Normal");
   game.removeAt(4, 4, "Normal");
-  const attacker = game.placeNew("Knight", COLORS.BLACK, 4, 4, "Normal");
-  game.takeAt(3, 3, attacker, "Normal");
-  assert.equal(game.getCell(3, 3, "Normal"), null);
-  assert.equal(game.getCell(3, 3, "Heaven")?.uid, bomber.uid);
+  const bomber = game.placeNew("SuicideBomber", COLORS.WHITE, 4, 4, "Normal");
+  game.removeAt(5, 5, "Normal");
+  const attacker = game.placeNew("Knight", COLORS.BLACK, 5, 5, "Normal");
+  game.takeAt(4, 4, attacker, "Normal");
   assert.equal(game.getCell(4, 4, "Normal"), null);
+  assert.equal(game.getCell(4, 4, "Heaven")?.uid, bomber.uid);
+  assert.equal(game.getCell(5, 5, "Normal"), null);
 });
 
 test("large pieces occupy a translated rectangular footprint", () => {
@@ -112,4 +124,40 @@ test("large pieces occupy a translated rectangular footprint", () => {
   assert.equal(game.validMove({ x: 2, y: 3 }, { x: 4, y: 5 }), true);
   game.move({ x: 2, y: 3 }, { x: 4, y: 5 });
   assert.equal(game.getCell(4, 5, "Normal").uid, superKing.uid);
+});
+
+test("pawns can capture portals diagonally and purchased NPCs use root assets", () => {
+  const game = new GameState({ online: true, seed: "portal-pawn" });
+  game.removeAt(0, 3, "Normal");
+  game.removeAt(1, 5, "Normal");
+  const portal = game.placeNew("Portal", COLORS.NPC, 1, 5, "Normal");
+  const pawn = game.getCell(0, 6, "Normal");
+  assert.equal(imageKey(portal), "portal.png");
+  assert.equal(game.validMove({ x: 0, y: 6 }, { x: 1, y: 5 }, "Normal"), true);
+  game.move({ x: 0, y: 6 }, { x: 1, y: 5 });
+  assert.equal(game.getCell(0, 6, "Normal"), null);
+  assert.equal(game.getCell(1, 5, "Heaven")?.uid, pawn.uid);
+
+  const shop = new GameState({ online: true, seed: "npc-assets" });
+  const mine = shop.buy("landmine", 4, 4);
+  assert.equal(mine, true);
+  assert.equal(imageKey(shop.getCell(4, 4, "Normal")), "landmine.png");
+  assert.equal(shop.whiteToMove, false);
+  shop.whiteToMove = true;
+  shop.whiteGP = 10;
+  assert.equal(shop.buy("portal", 5, 4), true);
+  assert.equal(imageKey(shop.getCell(5, 4, "Normal")), "portal.png");
+});
+
+test("resignation and agreed draws end multiplayer games", () => {
+  const resigned = new GameState({ online: true, seed: "resign" });
+  assert.equal(resigned.resign(COLORS.WHITE), true);
+  assert.equal(resigned.gameOver, true);
+  assert.equal(resigned.winner, COLORS.BLACK);
+
+  const drawn = new GameState({ online: true, seed: "draw" });
+  assert.equal(drawn.offerDraw(COLORS.WHITE), true);
+  assert.equal(drawn.respondDraw(COLORS.BLACK, true), true);
+  assert.equal(drawn.draw, true);
+  assert.equal(drawn.gameOver, true);
 });
