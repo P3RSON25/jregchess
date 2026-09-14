@@ -136,17 +136,21 @@ function render() {
   boardElement.append(tilesLayer, pieceLayer);
   const selectedPiece = selected && game.getCell(selected.x, selected.y, boardName);
   const legal = new Set(selectedPiece ? game.legalMoves(selected, boardName).map(position => `${position.x},${position.y}`) : []);
+  const shopItem = pendingTool?.kind === "buy" ? SHOP_ITEMS.find(item => item[0] === pendingTool.id) : null;
+  const upgradeItem = pendingTool?.kind === "upgrade" ? UPGRADES.find(item => item[0] === pendingTool.id) : null;
   const board = game.board(boardName);
   for (let displayY = 0; displayY < 8; displayY++) for (let displayX = 0; displayX < 8; displayX++) {
     const { x, y } = gameCoordinate(displayX, displayY);
+    const piece = board?.[y]?.[x];
     const tile = document.createElement("button");
     tile.className = `tile ${squareClass(boardName, x, y)}`;
     if (selected?.x === x && selected?.y === y) tile.classList.add("selected");
     else if (legal.has(`${x},${y}`)) tile.classList.add("legal");
+    if (canAct() && shopItem && boardName === "Normal" && !piece && game.funds() >= shopItem[1]) tile.classList.add("purchase-target");
+    if (canAct() && upgradeItem && piece && piece.color === currentColor() && game.funds() >= 5 && upgradeItem[1].includes(piece.type)) tile.classList.add("upgrade-target");
     tile.setAttribute("role", "gridcell");
     tile.setAttribute("aria-label", `${String.fromCharCode(97 + x)}${8 - y}${board?.[y]?.[x] ? ` ${board[y][x].type}` : " empty"}`);
     tile.addEventListener("click", () => handleTile(displayX, displayY));
-    const piece = board?.[y]?.[x];
     if (piece && !LARGE_SIZES[piece.type]) renderPiece(tile, piece);
     tile.style.gridColumn = `${displayX + 1}`;
     tile.style.gridRow = `${displayY + 1}`;
@@ -194,7 +198,17 @@ function renderLargePiece(layer, piece, board) {
     const part = board?.[partY]?.[partX];
     if (!part) continue;
     const img = new Image();
-    img.onload = () => context.drawImage(img, displayXPart * 64, displayYPart * 64, 64, 64);
+    img.onload = () => {
+      context.save();
+      if (isMirrored()) {
+        context.translate((displayXPart + 1) * 64, (displayYPart + 1) * 64);
+        context.rotate(Math.PI);
+        context.drawImage(img, -64, -64, 64, 64);
+      } else {
+        context.drawImage(img, displayXPart * 64, displayYPart * 64, 64, 64);
+      }
+      context.restore();
+    };
     img.src = asset(imageKey(part));
   }
   overlay.append(canvas);

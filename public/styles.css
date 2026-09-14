@@ -39,6 +39,7 @@ body { margin: 8px; min-width: 320px; }
 .tile.heaven-light { background: var(--heaven-light); }.tile.heaven-dark { background: var(--heaven-dark); }
 .tile.hell-light { background: var(--hell-light); }.tile.hell-dark { background: var(--hell-dark); }
 .tile.legal { background: var(--green); }.tile.selected { background: var(--cyan); }
+.tile.purchase-target, .tile.upgrade-target { background: var(--green); }
 .tile img { display: block; width: 92%; height: 92%; object-fit: contain; image-rendering: auto; pointer-events: none; }
 .piece-overlay { min-width: 0; min-height: 0; overflow: hidden; }
 .piece-composite { display: block; width: 100%; height: 100%; image-rendering: auto; }
