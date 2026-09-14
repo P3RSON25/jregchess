@@ -142,6 +142,8 @@ export class GameState {
     this.nextGroup = 1;
     this.turnsSinceNewRule = 0;
     this.rulePicker = false;
+    this.rulePickerColor = null;
+    this.nextRulePickerColor = COLORS.WHITE;
     this.pendingDecision = null;
     this.winner = null;
     this.gameOver = false;
@@ -681,7 +683,7 @@ export class GameState {
   addRule(rule) {
     if (this.gameOver) return this.reject("The game is over.");
     if (!RULES.includes(rule)) return this.reject("Unknown rule.");
-    this.rulePicker = false; this.turnsSinceNewRule = 0;
+    this.rulePicker = false; this.rulePickerColor = null; this.turnsSinceNewRule = 0;
     switch (rule) {
       case "MORE_GOLD": this.whiteGP += 10; this.blackGP += 10; this.emit("EVERYONE GETS +10GP!"); break;
       case "GOLD_RUSH": this.emit("GOLD RUSH!"); for (let i = 0; i < 5; i++) { const p = { x: this.random.inclusive(0, 7), y: this.random.inclusive(0, 7) }; if (!this.getCell(p.x, p.y, "Normal")) this.placeNew("Coin", COLORS.NPC, p.x, p.y, "Normal"); } break;
@@ -690,7 +692,12 @@ export class GameState {
       case "PORTALS_OPEN": { const heaven = this.placeNew("Portal", COLORS.NPC, 0, 4, "Normal"); heaven.portalTo = "Heaven"; const hell = this.placeNew("Portal", COLORS.NPC, 7, 3, "Normal"); hell.portalTo = "Hell"; } break;
       case "PAWN_UPGRADE": { let white = false, black = false; for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) { const p = this.getCell(x, y, "Normal"); if (p && PAWN_TYPES.has(p.type) && ((p.color === COLORS.WHITE && !white) || (p.color === COLORS.BLACK && !black))) { this.removeGroup(p, "Normal"); this.placeNew("Centaur", p.color, x, y, "Normal"); if (p.color === COLORS.WHITE) white = true; else black = true; } } } break;
       case "TREASURE": this.placeNew("Treasure", COLORS.NPC, this.random.inclusive(0, 7), this.random.inclusive(3, 4), "Normal"); break;
-      case "LANDMINES": case "PITTRAPS": { const type = rule === "LANDMINES" ? "Landmine" : "Pittrap"; for (let i = 0; i < 3; i++) { const p = { x: this.random.inclusive(0, 7), y: this.random.inclusive(0, 7) }; if (!this.getCell(p.x, p.y, "Normal")) this.placeNew(type, COLORS.NPC, p.x, p.y, "Normal"); } } break;
+      case "LANDMINES": case "PITTRAPS": {
+        const type = rule === "LANDMINES" ? "Landmine" : "Pittrap";
+        const spawned = this.spawnRandomEmpty(type, 3, "Normal");
+        this.emit(`${spawned} ${rule === "LANDMINES" ? "landmines" : "pittraps"} spawned.`);
+        break;
+      }
       case "WILD_LIFE": { const a = this.placeNew("Wildlife", COLORS.NPC, 0, 3, "Normal"); if (a) a.movingRight = true; const b = this.placeNew("Wildlife", COLORS.NPC, 7, 4, "Normal"); if (b) b.movingRight = false; this.automovingPieces.push(a, b); } break;
       case "WILD_HORSE": { const p = this.placeNew("WildHorse", COLORS.NPC, 4, 3, "Normal"); if (p) this.automovingPieces.push(p); } break;
       case "ZOMBIE_APOCALYPSE": for (const [x, y, right] of [[0, 3, true], [0, 4, true], [7, 3, false], [7, 4, false]]) { const p = this.placeNew("Zombie", COLORS.NPC, x, y, "Normal"); if (p) { p.movingRight = right; this.automovingPieces.push(p); } } break;
@@ -707,11 +714,30 @@ export class GameState {
   replaceMatching(types, replacement) {
     for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) { const p = this.getCell(x, y, "Normal"); if (p && types.has(p.type)) { const color = p.color; this.removeGroup(p, "Normal"); this.placeNew(replacement, color, x, y, "Normal"); } }
   }
+  spawnRandomEmpty(type, count, boardName = "Normal") {
+    const board = this.board(boardName);
+    if (!board) return 0;
+    const empty = [];
+    for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) if (!board[y][x]) empty.push({ x, y });
+    let spawned = 0;
+    while (spawned < count && empty.length) {
+      const index = this.random.nextInt(empty.length);
+      const spot = empty.splice(index, 1)[0];
+      if (this.placeNew(type, COLORS.NPC, spot.x, spot.y, boardName)) spawned++;
+    }
+    return spawned;
+  }
+
   nextTurn() {
     if (this.gameOver) return;
     this.whiteToMove = !this.whiteToMove; this.turnsSinceNewRule++;
     for (const piece of [...this.automovingPieces]) this.automove(piece);
-    if (this.turnsSinceNewRule >= this.rules.length * 2 && this.availableRules.length) { this.rulePicker = true; this.turnsSinceNewRule = 0; }
+    if (this.turnsSinceNewRule >= this.rules.length * 2 && this.availableRules.length) {
+      this.rulePicker = true;
+      this.rulePickerColor = this.nextRulePickerColor;
+      this.nextRulePickerColor = this.nextRulePickerColor === COLORS.WHITE ? COLORS.BLACK : COLORS.WHITE;
+      this.turnsSinceNewRule = 0;
+    }
   }
   automove(piece) {
     const current = this.findByUid(piece.uid); if (!current || current.board !== "Normal") return;
@@ -753,12 +779,12 @@ export class GameState {
       const board = this.board(boardName); if (!board) return null;
       return board.map(row => row.map(piece => piece ? { uid: piece.uid, type: piece.type, color: piece.color, part: piece.part, group: piece.group, x: piece.x, y: piece.y, health: piece.health, moved: piece.moved, movingRight: piece.movingRight, portalTo: piece.portalTo, board: piece.board } : null));
     };
-    return { online: this.online, mode: this.mode, currentBoard: this.currentBoard, whiteToMove: this.whiteToMove, whiteGP: this.whiteGP, blackGP: this.blackGP, rules: [...this.rules], availableRules: [...this.availableRules], rulePicker: this.rulePicker, pendingDecision: this.pendingDecision ? { type: this.pendingDecision.type, title: this.pendingDecision.title, color: this.pendingDecision.color, advancesTurn: this.pendingDecision.advancesTurn, continuation: this.pendingDecision.continuation } : null, winner: this.winner, gameOver: this.gameOver, draw: this.draw, drawOffer: this.drawOffer, endReason: this.endReason, lastEvent: this.lastEvent, automovingUids: this.automovingPieces.map(piece => piece.uid), boards: { Normal: serialize("Normal"), Heaven: serialize("Heaven"), Hell: serialize("Hell") }, history: this.history.slice(-100) };
+    return { online: this.online, mode: this.mode, currentBoard: this.currentBoard, whiteToMove: this.whiteToMove, whiteGP: this.whiteGP, blackGP: this.blackGP, rules: [...this.rules], availableRules: [...this.availableRules], rulePicker: this.rulePicker, rulePickerColor: this.rulePickerColor, nextRulePickerColor: this.nextRulePickerColor, pendingDecision: this.pendingDecision ? { type: this.pendingDecision.type, title: this.pendingDecision.title, color: this.pendingDecision.color, advancesTurn: this.pendingDecision.advancesTurn, continuation: this.pendingDecision.continuation } : null, winner: this.winner, gameOver: this.gameOver, draw: this.draw, drawOffer: this.drawOffer, endReason: this.endReason, lastEvent: this.lastEvent, automovingUids: this.automovingPieces.map(piece => piece.uid), boards: { Normal: serialize("Normal"), Heaven: serialize("Heaven"), Hell: serialize("Hell") }, history: this.history.slice(-100) };
   }
 
   static fromSnapshot(snapshot) {
     const game = Object.create(GameState.prototype);
-    Object.assign(game, { online: snapshot.online, mode: snapshot.mode, currentBoard: snapshot.currentBoard, whiteToMove: snapshot.whiteToMove, whiteGP: snapshot.whiteGP, blackGP: snapshot.blackGP, rules: [...snapshot.rules], availableRules: [...(snapshot.availableRules || RULE_PICKER)], rulePicker: snapshot.rulePicker, pendingDecision: snapshot.pendingDecision, winner: snapshot.winner, gameOver: Boolean(snapshot.gameOver), draw: Boolean(snapshot.draw), drawOffer: snapshot.drawOffer || null, endReason: snapshot.endReason || null, lastEvent: snapshot.lastEvent, eventId: snapshot.lastEvent?.id || 0, history: snapshot.history || [], automovingPieces: [], nextUid: 1, nextGroup: 1, turnsSinceNewRule: 0, _exploding: false, boards: { Normal: blankBoard(), Heaven: blankBoard(), Hell: blankBoard() }, random: new JavaRandom(1n) });
+    Object.assign(game, { online: snapshot.online, mode: snapshot.mode, currentBoard: snapshot.currentBoard, whiteToMove: snapshot.whiteToMove, whiteGP: snapshot.whiteGP, blackGP: snapshot.blackGP, rules: [...snapshot.rules], availableRules: [...(snapshot.availableRules || RULE_PICKER)], rulePicker: snapshot.rulePicker, rulePickerColor: snapshot.rulePickerColor || null, nextRulePickerColor: snapshot.nextRulePickerColor || COLORS.WHITE, pendingDecision: snapshot.pendingDecision, winner: snapshot.winner, gameOver: Boolean(snapshot.gameOver), draw: Boolean(snapshot.draw), drawOffer: snapshot.drawOffer || null, endReason: snapshot.endReason || null, lastEvent: snapshot.lastEvent, eventId: snapshot.lastEvent?.id || 0, history: snapshot.history || [], automovingPieces: [], nextUid: 1, nextGroup: 1, turnsSinceNewRule: 0, _exploding: false, boards: { Normal: blankBoard(), Heaven: blankBoard(), Hell: blankBoard() }, random: new JavaRandom(1n) });
     for (const boardName of BOARD_NAMES) {
       const rows = snapshot.boards[boardName]; if (!rows) { game.boards[boardName] = null; continue; }
       for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) { const piece = rows[y][x]; if (piece) { game.boards[boardName][y][x] = { ...piece }; game.nextUid = Math.max(game.nextUid, piece.uid + 1); game.nextGroup = Math.max(game.nextGroup, Number(String(piece.group || "g0").slice(1)) + 1); } }

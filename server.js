@@ -170,6 +170,8 @@ function handleAction(peer, message) {
   const turnIndependent = ["resign", "offerDraw", "respondDraw"].includes(message.action);
   if (message.action === "decision") {
     if (!waitingDecision || waitingDecision.color !== actorColor) return peer.send({ type: "error", message: "That choice belongs to the other player." });
+  } else if (message.action === "rule") {
+    if (!game.rulePicker || game.rulePickerColor !== actorColor) return peer.send({ type: "error", message: "That rule choice belongs to the other player." });
   } else if (!turnIndependent && actorColor !== game.currentColor()) {
     return peer.send({ type: "error", message: "Wait for your turn." });
   }

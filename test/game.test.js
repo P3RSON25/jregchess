@@ -85,10 +85,14 @@ test("online turns open the rule picker and spawn selected rules", () => {
   const game = new GameState({ online: true, seed: "online-rules" });
   for (let i = 0; i < 4; i++) game.nextTurn();
   assert.equal(game.rulePicker, true);
+  assert.equal(game.rulePickerColor, COLORS.WHITE);
   assert.equal(game.addRule("WILD_HORSE"), true);
   assert.equal(game.rulePicker, false);
   assert.equal(game.rules.includes("WILD_HORSE"), true);
   assert.equal(game.getCell(4, 3, "Normal")?.type, "WildHorse");
+  for (let i = 0; i < 6; i++) game.nextTurn();
+  assert.equal(game.rulePicker, true);
+  assert.equal(game.rulePickerColor, COLORS.BLACK);
 });
 
 test("snapshots round-trip board state and automovers", () => {
@@ -151,6 +155,25 @@ test("pawns can capture portals diagonally and purchased NPCs use root assets", 
   shop.whiteGP = 10;
   assert.equal(shop.buy("portal", 5, 4), true);
   assert.equal(imageKey(shop.getCell(5, 4, "Normal")), "portal.png");
+});
+
+test("landmine and pittrap rules spawn usable traps on empty squares", () => {
+  const game = new GameState({ online: true, seed: "traps" });
+  const normal = game.boards.Normal;
+  for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) game.removeAt(x, y, "Normal");
+  game.addRule("LANDMINES");
+  assert.equal(normal.flat().filter(piece => piece?.type === "Landmine").length, 3);
+  const mine = normal.flat().find(piece => piece?.type === "Landmine");
+  const mineX = mine.x;
+  const mineY = mine.y;
+  assert.equal(game.takeAt(mineX, mineY, null, "Normal"), false);
+  assert.equal(game.getCell(mineX, mineY, "Normal"), null);
+
+  game.addRule("PITTRAPS");
+  assert.equal(normal.flat().filter(piece => piece?.type === "Pittrap").length, 3);
+  const trap = normal.flat().find(piece => piece?.type === "Pittrap");
+  assert.equal(game.takeAt(trap.x, trap.y, null, "Normal"), false);
+  assert.equal(game.getCell(trap.x, trap.y, "Normal"), null);
 });
 
 test("resignation and agreed draws end multiplayer games", () => {

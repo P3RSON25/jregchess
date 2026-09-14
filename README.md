@@ -82,6 +82,14 @@ The Switch board control is a local view control, not a game action. Either
 player can cycle through every surviving board at any time, including during
 the opponent's turn, without changing turn state.
 
+Black players see each board from the Black side: files and ranks are mirrored
+in the browser, while submitted game coordinates are translated back to the
+authoritative board coordinates.
+
+Rule selection alternates between White and Black independently of the chess
+turn. Landmine and Pittrap rules select from currently empty squares so their
+three traps are placed reliably, and the game reports how many spawned.
+
 Destroying Hell resolves kings immediately: both opposing king colors in Hell
 produce a draw, while a single king color produces a win for the other side.
 Purchased Kings and Super Kings are included in this resolution.

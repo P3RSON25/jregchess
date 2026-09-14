@@ -27,6 +27,10 @@ function currentColor() { return game?.whiteToMove ? COLORS.WHITE : COLORS.BLACK
 function playerColor() { return localRole === "white" ? COLORS.WHITE : localRole === "black" ? COLORS.BLACK : null; }
 function canAct() { return localRole === "offline" || playerColor() === currentColor(); }
 function isOnline() { return localRole === "white" || localRole === "black" || localRole === "spectator"; }
+function canPickRule() { return localRole !== "spectator" && (!isOnline() || game?.rulePickerColor === playerColor()); }
+function isMirrored() { return localRole === "black"; }
+function displayCoordinate(x, y) { return isMirrored() ? { x: 7 - x, y: 7 - y } : { x, y }; }
+function gameCoordinate(x, y) { return displayCoordinate(x, y); }
 
 function showGame() {
   menu.classList.add("hidden"); gameScreen.classList.remove("hidden");
@@ -133,16 +137,19 @@ function render() {
   const selectedPiece = selected && game.getCell(selected.x, selected.y, boardName);
   const legal = new Set(selectedPiece ? game.legalMoves(selected, boardName).map(position => `${position.x},${position.y}`) : []);
   const board = game.board(boardName);
-  for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) {
+  for (let displayY = 0; displayY < 8; displayY++) for (let displayX = 0; displayX < 8; displayX++) {
+    const { x, y } = gameCoordinate(displayX, displayY);
     const tile = document.createElement("button");
     tile.className = `tile ${squareClass(boardName, x, y)}`;
     if (selected?.x === x && selected?.y === y) tile.classList.add("selected");
     else if (legal.has(`${x},${y}`)) tile.classList.add("legal");
     tile.setAttribute("role", "gridcell");
     tile.setAttribute("aria-label", `${String.fromCharCode(97 + x)}${8 - y}${board?.[y]?.[x] ? ` ${board[y][x].type}` : " empty"}`);
-    tile.addEventListener("click", () => handleTile(x, y));
+    tile.addEventListener("click", () => handleTile(displayX, displayY));
     const piece = board?.[y]?.[x];
     if (piece && !LARGE_SIZES[piece.type]) renderPiece(tile, piece);
+    tile.style.gridColumn = `${displayX + 1}`;
+    tile.style.gridRow = `${displayY + 1}`;
     tilesLayer.append(tile);
   }
   const renderedGroups = new Set();
@@ -152,7 +159,7 @@ function render() {
     renderedGroups.add(piece.group);
     renderLargePiece(pieceLayer, piece, board);
   }
-  $("#selection-status").textContent = pendingTool ? `${pendingTool.kind === "buy" ? "Place" : "Upgrade"}: ${pendingTool.id}` : selected ? (canAct() ? "Choose a destination" : "Analyzing position") : canAct() ? "Select a piece" : "Waiting for opponent";
+  $("#selection-status").textContent = game.rulePicker ? (canPickRule() ? "Pick a rule" : `${game.rulePickerColor} picks a rule`) : pendingTool ? `${pendingTool.kind === "buy" ? "Place" : "Upgrade"}: ${pendingTool.id}` : selected ? (canAct() ? "Choose a destination" : "Analyzing position") : canAct() ? "Select a piece" : "Waiting for opponent";
   renderModalState();
 }
 
@@ -168,21 +175,26 @@ function renderPiece(tile, piece) {
 
 function renderLargePiece(layer, piece, board) {
   const [width, height] = LARGE_SIZES[piece.type];
+  const displayOrigin = displayCoordinate(piece.x, piece.y);
+  const displayX = isMirrored() ? displayOrigin.x - width + 1 : displayOrigin.x;
+  const displayY = isMirrored() ? displayOrigin.y - height + 1 : displayOrigin.y;
   const overlay = document.createElement("div");
   overlay.className = "piece-overlay";
-  overlay.style.gridColumn = `${piece.x + 1} / span ${width}`;
-  overlay.style.gridRow = `${piece.y + 1} / span ${height}`;
+  overlay.style.gridColumn = `${displayX + 1} / span ${width}`;
+  overlay.style.gridRow = `${displayY + 1} / span ${height}`;
   const canvas = document.createElement("canvas");
   canvas.className = "piece-composite";
   canvas.width = width * 64;
   canvas.height = height * 64;
   canvas.setAttribute("aria-label", piece.type);
   const context = canvas.getContext("2d");
-  for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
-    const part = board?.[piece.y + y]?.[piece.x + x];
+  for (let displayYPart = 0; displayYPart < height; displayYPart++) for (let displayXPart = 0; displayXPart < width; displayXPart++) {
+    const partX = isMirrored() ? piece.x + width - 1 - displayXPart : piece.x + displayXPart;
+    const partY = isMirrored() ? piece.y + height - 1 - displayYPart : piece.y + displayYPart;
+    const part = board?.[partY]?.[partX];
     if (!part) continue;
     const img = new Image();
-    img.onload = () => context.drawImage(img, x * 64, y * 64, 64, 64);
+    img.onload = () => context.drawImage(img, displayXPart * 64, displayYPart * 64, 64, 64);
     img.src = asset(imageKey(part));
   }
   overlay.append(canvas);
@@ -191,13 +203,14 @@ function renderLargePiece(layer, piece, board) {
 
 function handleTile(x, y) {
   if (!game || game.pendingDecision || localRole === "spectator") return;
-  if (game.rulePicker && canAct()) return;
+  if (game.rulePicker && canPickRule()) return;
+  const gamePosition = gameCoordinate(x, y);
   if (!canAct()) {
-    const clicked = game.getCell(x, y, viewBoard);
+    const clicked = game.getCell(gamePosition.x, gamePosition.y, viewBoard);
     if (!selected) {
-      if (clicked) selected = { x, y };
+      if (clicked) selected = gamePosition;
     } else if (clicked) {
-      selected = { x, y };
+      selected = gamePosition;
     } else {
       selected = null;
     }
@@ -206,18 +219,18 @@ function handleTile(x, y) {
   }
   if (pendingTool?.kind === "buy") {
     if (viewBoard !== "Normal") { toast("Shop pieces must be placed on the Normal board."); return; }
-    sendAction({ action: "buy", id: pendingTool.id, x, y }); pendingTool = null; render(); return;
+    sendAction({ action: "buy", id: pendingTool.id, x: gamePosition.x, y: gamePosition.y }); pendingTool = null; render(); return;
   }
   if (pendingTool?.kind === "upgrade") {
-    sendAction({ action: "upgrade", id: pendingTool.id, x, y, board: viewBoard }); pendingTool = null; render(); return;
+    sendAction({ action: "upgrade", id: pendingTool.id, x: gamePosition.x, y: gamePosition.y, board: viewBoard }); pendingTool = null; render(); return;
   }
-  const clicked = game.getCell(x, y, viewBoard);
+  const clicked = game.getCell(gamePosition.x, gamePosition.y, viewBoard);
   if (!selected) {
-    if (clicked && clicked.color === currentColor()) { selected = { x, y }; render(); }
+    if (clicked && clicked.color === currentColor()) { selected = gamePosition; render(); }
     return;
   }
   const from = selected; selected = null;
-  sendAction({ action: "move", from, to: { x, y }, board: viewBoard });
+  sendAction({ action: "move", from, to: gamePosition, board: viewBoard });
   render();
 }
 
@@ -315,7 +328,7 @@ function showDecision(decision) {
 function renderModalState() {
   if (!game || localRole === "spectator") return;
   if (game.rulePicker && modalRoot.classList.contains("hidden")) {
-    if (!isOnline() || canAct()) return showRulePicker();
+    if (canPickRule()) return showRulePicker();
     return;
   }
   if (game.pendingDecision) {
