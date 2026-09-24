@@ -81,6 +81,14 @@ const NPC_TYPES = new Set([
   "Wildlife", "WildHorse", "Zombie", "Meteor", "Treasure", "Landmine", "Bomb", "Pittrap",
   "Whirlpool", "Void", "Placeholder"
 ]);
+const CONTROLLED_TYPES = new Set(["Zombie", "WildHorse", "Wildlife"]);
+const EXPLOSIVE_TYPES = new Set(["Landmine", "Bomb", "SuicideBomber", "Jester"]);
+const HEAVEN_DEATH_TYPES = new Set(["SuicideBomber", "Jester"]);
+const AUTOMOVING_TYPES = new Set(["Zombie", "WildHorse", "Wildlife", "Meteor", "AggroAngel", "AggroDevil"]);
+const DECISION_CHOICES = {
+  angel: ["yes", "no"], atheism: ["heaven", "hell", "metaphysical"],
+  devil: ["release", "remove", "smite", "gold"]
+};
 const PAWN_TYPES = new Set(["Pawn", "SuicideBomber", "Centaur"]);
 const KNIGHT_TYPES = new Set(["Knight", "Unicorn"]);
 const BISHOP_TYPES = new Set(["Bishop", "BishopKnight", "Necromancer", "SuperBishop", "Jester"]);
@@ -95,12 +103,12 @@ class JavaRandom {
   }
   nextInt(bound) {
     if (bound <= 0) throw new Error("bound must be positive");
-    if ((bound & (bound - 1)) === 0) return (bound * this.next(31)) >> 31;
+    if ((bound & (bound - 1)) === 0) return Math.floor(bound * this.next(31) / 0x80000000);
     let bits, value;
     do {
       bits = this.next(31);
       value = bits % bound;
-    } while (bits - value + (bound - 1) < 0);
+    } while (bits - value + (bound - 1) > 0x7fffffff);
     return value;
   }
   inclusive(min, max) { return min + this.nextInt(max - min + 1); }
@@ -113,9 +121,11 @@ function hashSeed(seed) {
 }
 
 function blankBoard() { return Array.from({ length: 8 }, () => Array(8).fill(null)); }
-function inBounds(x, y) { return x >= 0 && x < 8 && y >= 0 && y < 8; }
-function key(x, y) { return `${x},${y}`; }
-function absDiff(a, b) { return { x: Math.abs(a.x - b.x), y: Math.abs(a.y - b.y) }; }
+function inBounds(x, y) { return Number.isInteger(x) && Number.isInteger(y) && x >= 0 && x < 8 && y >= 0 && y < 8; }
+function samePiece(a, b) { return Boolean(a && b && (a.uid === b.uid || (a.group && a.group === b.group))); }
+function pieceType(id) { return id.split("-").map(word => word[0].toUpperCase() + word.slice(1)).join(""); }
+function locationOf(piece) { return { board: piece.board, x: piece.x, y: piece.y }; }
+function deathKey(piece, location) { return `${piece.uid}:${location.board}:${location.x},${location.y}`; }
 
 export function randomJoinCode() {
   const alphabet = "abcdefghijklmnopqrstuvwxyz";
@@ -153,8 +163,16 @@ export class GameState {
     this.lastEvent = null;
     this.eventId = 0;
     this.history = [];
-    this._exploding = false;
+    this._resolutionDepth = 0;
+    this._resolution = null;
+    this._blast = null;
+    this._decisionQueue = [];
+    this._nextDecisionId = 1;
+    this._turnPending = false;
+    this._automoveQueue = null;
+    this.initializing = true;
     this.setup();
+    this.initializing = false;
   }
 
   setup() {
@@ -193,125 +211,331 @@ export class GameState {
   leader(piece) {
     if (!piece) return null;
     if (!piece.group) return piece;
+    if (piece.part === 0) return piece;
     const cells = this.groupCells(piece.group, piece.board);
     return cells.find(cell => cell.piece.part === 0)?.piece || piece;
   }
   removeGroup(piece, boardName = piece?.board) {
-    if (!piece) return;
-    const b = this.board(boardName);
-    if (!b) return;
-    const group = piece.group;
-    for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) {
-      if (b[y][x] && (!group ? b[y][x].uid === piece.uid : b[y][x].group === group)) b[y][x] = null;
+    if (!piece || piece.board !== boardName) return;
+    return this.resolve(() => this.removePiece(piece));
+  }
+  removeAt(x, y, board = this.currentBoard) {
+    this.removeGroup(this.getCell(x, y, board), board);
+  }
+
+  // A whole move (including deaths, arrivals and chained blasts) is one transaction.
+  // Victory is evaluated only after the last in-flight piece has been resolved.
+  resolve(operation) {
+    this.beginResolution();
+    try { return operation(); } finally { this.endResolution(); }
+  }
+  beginResolution() {
+    if (this._resolutionDepth === 0) this._resolution = { removed: new Set(), deaths: new Set() };
+    this._resolutionDepth++;
+  }
+  endResolution() {
+    this._resolutionDepth--;
+    if (this._resolutionDepth === 0) {
+      this.automovingPieces = [...new Map(this.automovingPieces.filter(piece =>
+        piece && !piece.controlledBy && this.findByUid(piece.uid)).map(piece => [piece.uid, piece])).values()];
+      const decisions = [this.pendingDecision, ...this._decisionQueue].filter(choice => choice &&
+        (choice.type !== "angel" || this.findByUid(choice.targetUid)?.type === "Angel"));
+      this.pendingDecision = decisions.shift() || null;
+      this._decisionQueue = decisions;
+      this._resolution = null;
+      this.checkVictory();
     }
   }
-  removeAt(x, y, board = this.currentBoard) { this.removeGroup(this.getCell(x, y, board), board); }
+
+  isNpcPiece(piece) {
+    return Boolean(piece && NPC_TYPES.has(piece.type) && !piece.controlledBy);
+  }
+
+  activeBoardNames() {
+    return BOARD_NAMES.filter(name => Boolean(this.boards[name]));
+  }
+
+  setGroupHealth(piece, health) {
+    const root = this.leader(piece);
+    if (!root) return;
+    root.health = health;
+    for (const part of root.related || []) part.health = health;
+    if (root.group) for (const cell of this.groupCells(root.group, root.board)) cell.piece.health = health;
+  }
+
+  setGroupColor(piece, color) {
+    const root = this.leader(piece);
+    root.color = color;
+    if (root.controlledBy) root.controlledBy = color;
+    for (const part of root.related || []) {
+      part.color = color;
+      part.controlledBy = root.controlledBy;
+    }
+  }
+
+  copyPieceState(from, to) {
+    for (const property of ["moved", "movingRight", "controlledBy", "wildCounterpart", "portalTo"]) to[property] = from[property];
+    if (from.health !== undefined) to.health = from.health;
+  }
+
+  detachPiece(piece) {
+    if (!piece) return;
+    const root = this.leader(piece);
+    const group = root.group;
+    for (const boardName of BOARD_NAMES) {
+      const board = this.board(boardName);
+      if (!board) continue;
+      for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) {
+        const cell = board[y][x];
+        if (cell && (group ? cell.group === group : cell.uid === root.uid)) board[y][x] = null;
+      }
+    }
+  }
+
+  removePiece(piece) {
+    const root = this.leader(piece);
+    if (!root) return;
+    this.detachPiece(root);
+    this._resolution?.removed.add(root.uid);
+    this.automovingPieces = this.automovingPieces.filter(item => item && item.uid !== root.uid);
+  }
+
+  footprint(type, x, y) {
+    const [width, height] = LARGE_SIZES[type] || [1, 1];
+    if (!inBounds(x, y) || !inBounds(x + width - 1, y + height - 1)) return [];
+    const cells = [];
+    for (let dy = 0; dy < height; dy++) for (let dx = 0; dx < width; dx++) cells.push({ x: x + dx, y: y + dy });
+    return cells;
+  }
+
+  footprintClear(type, x, y, boardName, ignored = null) {
+    const cells = this.footprint(type, x, y);
+    return Boolean(this.board(boardName) && cells.length && cells.every(cell => {
+      const occupant = this.getCell(cell.x, cell.y, boardName);
+      return !occupant || samePiece(occupant, ignored);
+    }));
+  }
+
+  portalAt(x, y, boardName) {
+    const piece = this.getCell(x, y, boardName);
+    return piece?.type === "Portal" ? this.leader(piece) : null;
+  }
+
+  portalDestination(portal, boardName) {
+    if (portal.portalTo && this.board(portal.portalTo)) return portal.portalTo;
+    const candidates = (boardName === "Heaven" ? ["Hell", "Normal"] : ["Heaven", "Hell", "Normal"])
+      .filter(name => name !== boardName && this.board(name));
+    // When an explicit destination is gone, try its surviving corresponding chain.
+    if (portal.portalTo) {
+      const corresponding = candidates.find(name => this.portalAt(portal.x, portal.y, name));
+      if (corresponding) return corresponding;
+    }
+    return candidates[0] || null;
+  }
+
+  evaluatePortalChain(x, y) {
+    const active = this.activeBoardNames();
+    if (active.length < 2 || !active.every(name => this.portalAt(x, y, name))) return false;
+    return this.resolve(() => {
+      for (const boardName of active) this.removePiece(this.portalAt(x, y, boardName));
+      this.emit("The portal chain collapses.", "portal.png");
+      return true;
+    });
+  }
+
+  kingColorsAlive() {
+    const colors = new Set();
+    const seen = new Set();
+    for (const boardName of this.activeBoardNames()) {
+      const board = this.board(boardName);
+      for (const row of board) for (const piece of row) {
+        if (!piece || !["King", "SuperKing"].includes(piece.type)) continue;
+        const root = this.leader(piece);
+        const identity = root.group || root.uid;
+        if (seen.has(identity)) continue;
+        seen.add(identity);
+        colors.add(root.color);
+      }
+    }
+    return colors;
+  }
+
+  checkVictory() {
+    if (this.gameOver || this.initializing || this._resolutionDepth > 0) return;
+    const alive = this.kingColorsAlive();
+    if (!alive.has(COLORS.WHITE) && !alive.has(COLORS.BLACK)) this.drawGame("Both sides have no kings remaining. Game drawn.");
+    else if (!alive.has(COLORS.WHITE)) this.finishWinner(COLORS.BLACK);
+    else if (!alive.has(COLORS.BLACK)) this.finishWinner(COLORS.WHITE);
+  }
+
+  destroyDimension(boardName, message = null) {
+    if (!BOARD_NAMES.includes(boardName) || !this.board(boardName)) return false;
+    return this.resolve(() => {
+      const pieces = new Set(this.board(boardName).flat().filter(Boolean).map(piece => this.leader(piece)));
+      for (const piece of pieces) this.removePiece(piece);
+      this.boards[boardName] = null;
+      if (this.currentBoard === boardName) this.currentBoard = this.activeBoardNames()[0] || "Normal";
+      for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) this.evaluatePortalChain(x, y);
+      if (message) this.emit(message);
+      return true;
+    });
+  }
+
+  finishWinner(color) {
+    this.finishGame(color, "king-death", `${color} wins!`);
+  }
 
   makePiece(type, color, part = 0, group = null) {
-    return { uid: this.nextUid++, type, color, part, group, board: "Normal", x: 0, y: 0, moved: false, movingRight: undefined, portalTo: undefined, health: type === "SuperKing" ? 2 : type === "AggroDevil" ? 6 : undefined };
+    return {
+      uid: this.nextUid++, type, color, part, group, board: "Normal", x: 0, y: 0,
+      moved: false, movingRight: undefined, portalTo: undefined, controlledBy: undefined,
+      wildCounterpart: CONTROLLED_TYPES.has(type) ? type : undefined,
+      health: ["SuperKing", "Angel"].includes(type) ? 2 : type === "AggroDevil" ? 6 : undefined
+    };
   }
-  placeNew(type, color, x, y, board = "Normal") {
+  placeNew(type, color, x, y, board = "Normal", state = {}) {
+    if (!this.board(board) || !this.footprint(type, x, y).length || (["Landmine", "Pittrap"].includes(type) && board !== "Normal")) return null;
     const root = this.makePiece(type, color, 0, null);
-    return this.placeGroup(root, x, y, board, true) ? root : null;
+    for (const property of ["portalTo", "movingRight", "controlledBy", "wildCounterpart", "health", "moved"]) {
+      if (state[property] !== undefined) root[property] = state[property];
+    }
+    return this.placeGroup(root, x, y, board) === true ? root : null;
   }
-  placeGroup(root, x, y, boardName = this.currentBoard, isNew = false) {
+  placeGroup(root, x, y, boardName = this.currentBoard) {
+    return this.transportPiece(root, x, y, boardName);
+  }
+  installGroup(root, x, y, boardName) {
     const board = this.board(boardName);
-    if (!board || !root || !inBounds(x, y)) return false;
+    if (!this.footprintClear(root.type, x, y, boardName, root)) return false;
     const size = LARGE_SIZES[root.type];
+    this.detachPiece(root);
     if (!size) {
-      const existing = this.getCell(x, y, boardName);
-      if (existing && existing.uid !== root.uid && this.takeAt(x, y, root, boardName) !== true) return false;
-      this.removeGroup(root, root.board);
       root.group = null; root.part = 0; root.board = boardName; root.x = x; root.y = y;
       board[y][x] = root;
-      if (root.type === "Pawn" || root.type === "SuicideBomber" || root.type === "Centaur") this.promoteIfNeeded(root);
+      this.promoteIfNeeded(root);
+      if (root.type === "Portal" && this.evaluatePortalChain(x, y)) return "lost";
+      if (root.type === "Bomb") this.resolveHit(root, null, { cause: "placement" });
       return true;
     }
-
-    if (root.part !== 0 && root.group) root = this.leader(root);
-    if (y === 9 - size[0]) y -= size[0] - 1;
-    if (y === 9 - size[1]) y -= size[1] - 1;
-    if (!inBounds(x + size[0] - 1, y + size[1] - 1)) return false;
-    const origin = this.getCell(x, y, boardName);
-    if (origin && origin.group !== root.group && this.takeAt(x, y, root, boardName) !== true) return false;
-    this.removeGroup(root, root.board);
     const group = root.group || `g${this.nextGroup++}`;
     root.group = group; root.part = 0; root.board = boardName; root.x = x; root.y = y;
     const parts = [root];
     for (let py = 0; py < size[1]; py++) for (let px = 0; px < size[0]; px++) {
       const part = py * size[0] + px;
       if (part === 0) continue;
-      const component = this.makePiece(root.type, root.color, part, group);
+      const component = root.related?.[part] || this.makePiece(root.type, root.color, part, group);
+      component.type = root.type;
+      component.color = root.color;
+      component.part = part;
+      component.group = group;
       component.board = boardName; component.x = x + px; component.y = y + py;
-      component.health = root.health;
+      this.copyPieceState(root, component);
       parts[part] = component;
     }
     for (let py = 0; py < size[1]; py++) for (let px = 0; px < size[0]; px++) {
-      const cell = this.getCell(x + px, y + py, boardName);
-      if (cell && cell.group !== group) this.takeAt(x + px, y + py, root, boardName);
       board[y + py][x + px] = parts[py * size[0] + px];
     }
     root.related = parts;
     return true;
   }
+
+  transportPiece(piece, x, y, boardName, visited = new Set()) {
+    return this.resolve(() => {
+      const choicesBefore = this.decisionCount();
+      const result = this.resolveArrival(this.leader(piece), x, y, boardName, visited);
+      return result !== true && this.decisionCount() > choicesBefore ? "decision" : result;
+    });
+  }
+
+  resolveArrival(root, x, y, boardName, visited = new Set()) {
+    if (!root || this._resolution.removed.has(root.uid)) return "lost";
+    const cells = this.footprint(root.type, x, y);
+    const location = `${boardName}:${x},${y}`;
+    if (!this.board(boardName) || !cells.length || visited.has(location) ||
+        (["Landmine", "Pittrap"].includes(root.type) && boardName !== "Normal")) {
+      this.removePiece(root);
+      return "lost";
+    }
+    visited.add(location);
+
+    // A cross-dimension arrival is already in that dimension when it meets an
+    // occupant. A local mover stays at its origin until the capture succeeds.
+    if (!this.findByUid(root.uid) || root.board !== boardName) {
+      this.detachPiece(root);
+      root.board = boardName; root.x = x; root.y = y;
+    }
+    const origin = locationOf(root);
+    const encountered = new Set();
+    while (true) {
+      const cell = cells.find(position => {
+        const target = this.getCell(position.x, position.y, boardName);
+        return target && !samePiece(root, target);
+      });
+      if (!cell) break;
+      const target = this.leader(this.getCell(cell.x, cell.y, boardName));
+      if (encountered.has(target.uid)) { this.removePiece(root); return "lost"; }
+      encountered.add(target.uid);
+      if (target.type === "Portal") {
+        if (root.type === "Portal") {
+          this.evaluatePortalChain(cell.x, cell.y);
+          return false;
+        }
+        if (this.evaluatePortalChain(cell.x, cell.y)) { this.removePiece(root); return "lost"; }
+        const destination = this.portalDestination(target, boardName);
+        if (!destination) { this.removePiece(root); return "lost"; }
+        return this.resolveArrival(root, x, y, destination, visited);
+      }
+      if (!this.resolveCapture(target, root, { visited })) return false;
+      if (this._resolution.removed.has(root.uid) || this._resolution.deaths.has(deathKey(root, origin)) ||
+          root.board !== origin.board || root.x !== origin.x || root.y !== origin.y) return "lost";
+    }
+    return this.installGroup(root, x, y, boardName);
+  }
   moveGroup(root, toX, toY, boardName = root.board) {
     root = this.leader(root);
-    const size = LARGE_SIZES[root.type];
-    if (!size) {
-      this.removeGroup(root, boardName);
-      root.board = boardName; root.x = toX; root.y = toY;
-      this.board(boardName)[toY][toX] = root;
-      this.promoteIfNeeded(root);
-      return;
+    return this.transportPiece(root, toX, toY, boardName);
+  }
+
+  handleHeavenArrival(target, incoming) {
+    this.removePiece(incoming);
+    if (target.type === "Church") this.emit("The Church rejects the invading piece.", "church0.png");
+    else if (target.type === "Atheism") this.queueDecision("atheism", target);
+    else {
+      this.resolveHit(target, target.type === "Angel" ? incoming : null);
+      if (target.type === "Devil") this.queueDecision("devil", target);
     }
-    this.removeGroup(root, boardName);
-    root.x = toX; root.y = toY; root.board = boardName;
-    const parts = root.related || [];
-    for (let py = 0; py < size[1]; py++) for (let px = 0; px < size[0]; px++) {
-      const part = parts[py * size[0] + px] || root;
-      const occupant = this.getCell(toX + px, toY + py, boardName);
-      if (occupant && occupant.group !== root.group && this.takeAt(toX + px, toY + py, root, boardName) !== true) continue;
-      part.board = boardName; part.x = toX + px; part.y = toY + py;
-      this.board(boardName)[toY + py][toX + px] = part;
-    }
+    return false;
   }
   promoteIfNeeded(piece) {
     if (!piece || !PAWN_TYPES.has(piece.type)) return;
     if ((piece.color === COLORS.WHITE && piece.y === 0) || (piece.color === COLORS.BLACK && piece.y === 7)) {
-      const board = piece.board; const x = piece.x; const y = piece.y;
-      this.removeGroup(piece, board);
-      this.placeNew("Queen", piece.color, x, y, board);
+      this.replacePiece(piece, "Queen");
     }
   }
 
-  validMove(from, to, boardName = this.currentBoard) {
-    const board = this.board(boardName);
-    if (!board || !inBounds(from.x, from.y) || !inBounds(to.x, to.y) || (from.x === to.x && from.y === to.y)) return false;
-    let piece = this.getCell(from.x, from.y, boardName);
-    if (!piece) return false;
-    const target = this.getCell(to.x, to.y, boardName);
-    if (target && target.color === piece.color && target.type !== "Portal") return false;
-    if (piece.group && piece.part !== 0) {
-      const leader = this.leader(piece);
-      const diffX = piece.x - leader.x; const diffY = piece.y - leader.y;
-      from = { x: leader.x, y: leader.y };
-      to = { x: to.x - diffX, y: to.y - diffY };
-      piece = leader;
-      if (!inBounds(to.x, to.y)) return false;
-    }
-    if (LARGE_TYPES.has(piece.type)) {
-      const size = LARGE_SIZES[piece.type];
-      if (!inBounds(to.x + size[0] - 1, to.y + size[1] - 1)) return false;
-      for (let py = 0; py < size[1]; py++) for (let px = 0; px < size[0]; px++) {
-        const dest = this.getCell(to.x + px, to.y + py, boardName);
-        const source = this.getCell(piece.x + px, piece.y + py, boardName);
-        if (dest && dest.color === piece.color && dest.group !== piece.group) return false;
-        if (source && !this.basicValid(source, { x: to.x + px, y: to.y + py }, boardName, true)) return false;
-      }
-    }
-    return this.basicValid(piece, to, boardName, false);
+  moveCoordinates(from, to, boardName) {
+    const selected = this.getCell(from.x, from.y, boardName);
+    const piece = this.leader(selected);
+    return {
+      piece, from: { x: piece.x, y: piece.y },
+      to: { x: to.x - (selected.x - piece.x), y: to.y - (selected.y - piece.y) }
+    };
   }
-  basicValid(piece, to, boardName, largePart) {
+
+  validMove(from, to, boardName = this.currentBoard) {
+    if (!this.board(boardName) || !inBounds(from?.x, from?.y) || !inBounds(to?.x, to?.y) ||
+        (from.x === to.x && from.y === to.y) || !this.getCell(from.x, from.y, boardName)) return false;
+    const normalized = this.moveCoordinates(from, to, boardName);
+    const piece = normalized.piece;
+    const cells = this.footprint(piece.type, normalized.to.x, normalized.to.y);
+    if (!cells.length) return false;
+    for (const cell of cells) {
+      const target = this.getCell(cell.x, cell.y, boardName);
+      if (target && !samePiece(target, piece) && target.color === piece.color && target.type !== "Portal") return false;
+    }
+    return this.basicValid(piece, normalized.to, boardName);
+  }
+  basicValid(piece, to, boardName) {
     const from = { x: piece.x, y: piece.y }; const d = { x: from.x - to.x, y: from.y - to.y };
     const ad = { x: Math.abs(d.x), y: Math.abs(d.y) }; const target = this.getCell(to.x, to.y, boardName);
     const pathClear = (dx, dy) => {
@@ -319,6 +543,7 @@ export class GameState {
       for (let i = 1; i < distance; i++) if (this.getCell(from.x + Math.sign(dx) * i, from.y + Math.sign(dy) * i, boardName)) return false;
       return true;
     };
+    if (piece.controlledBy && CONTROLLED_TYPES.has(piece.type)) return ad.x <= 1 && ad.y <= 1 && (ad.x + ad.y > 0);
     switch (piece.type) {
       case "Pawn": case "SuicideBomber": case "Centaur": {
         const forward = piece.color === COLORS.BLACK ? 1 : -1;
@@ -355,7 +580,7 @@ export class GameState {
         return piece.type === "BallQueen" && ((ad.y === 3 && ad.x <= 1) || (ad.x === 3 && ad.y <= 1) || (ad.x === 2 && ad.y === 2));
       }
       case "King": return ad.x <= 1 && ad.y <= 1;
-      case "SuperKing": return ad.x <= 2 && ad.y <= 2 && (ad.x !== 0 || ad.y !== 0);
+      case "SuperKing": return ad.x <= 1 && ad.y <= 1 && (ad.x !== 0 || ad.y !== 0);
       case "TrojanHorse": return d.x === 0 && ((piece.color === COLORS.BLACK ? -d.y : d.y) === 1);
       case "Giraffe": return (ad.x === 3 && ad.y === 1) || (ad.x === 1 && ad.y === 3);
       case "Meteor": case "WildHorse": case "Zombie": return true;
@@ -365,46 +590,86 @@ export class GameState {
   }
   legalMoves(from, boardName = this.currentBoard) {
     const result = [];
-    for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) if (this.validMove(from, { x, y }, boardName)) result.push({ x, y });
+    for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) {
+      const target = this.getCell(x, y, boardName);
+      if (this.validMove(from, { x, y }, boardName) || (target && this.validAttack(from, { x, y }, boardName))) result.push({ x, y });
+    }
     return result;
+  }
+
+  validAttack(from, to, boardName = this.currentBoard) {
+    if (!inBounds(from?.x, from?.y) || !inBounds(to?.x, to?.y)) return false;
+    const piece = this.getCell(from.x, from.y, boardName);
+    const target = this.getCell(to.x, to.y, boardName);
+    if (!piece || !target || piece.type !== "SuperKing" || target.color === piece.color) return false;
+    const leader = piece.group && piece.part !== 0 ? this.leader(piece) : piece;
+    const dx = Math.abs(leader.x - to.x);
+    const dy = Math.abs(leader.y - to.y);
+    return Math.max(dx, dy) === 2;
   }
 
   currentColor() { return this.whiteToMove ? COLORS.WHITE : COLORS.BLACK; }
   funds() { return this.whiteToMove ? this.whiteGP : this.blackGP; }
-  giveGold(amount) { if (this.whiteToMove) this.whiteGP += amount; else this.blackGP += amount; }
+  giveGold(amount, color = this.currentColor()) { if (color === COLORS.WHITE) this.whiteGP += amount; else if (color === COLORS.BLACK) this.blackGP += amount; }
   withdraw(amount) { this.giveGold(-amount); }
   emit(message, icon = null) { this.lastEvent = { id: ++this.eventId, message, icon }; }
 
-  buy(id, x, y) {
+  actionBlocked() { return this.gameOver || this.rulePicker || Boolean(this.pendingDecision); }
+
+  canBuy(id, x, y, boardName = "Normal") {
+    const item = SHOP_ITEMS.find(entry => entry[0] === id);
+    return Boolean(!this.actionBlocked() && item && boardName === "Normal" && this.funds() >= item[1] &&
+      this.footprintClear(pieceType(id), x, y, boardName));
+  }
+
+  buy(id, x, y, boardName = "Normal") {
     if (this.gameOver) return this.reject("The game is over.");
+    if (this.rulePicker || this.pendingDecision) return this.reject("Resolve the open choice first.");
     const item = SHOP_ITEMS.find(entry => entry[0] === id);
     if (!item) return this.reject("Unknown shop item");
-    if (this.currentBoard !== "Normal") return this.reject("Shop pieces can only be placed on the material board.");
+    if (boardName !== "Normal" || !this.board("Normal")) return this.reject("Shop pieces can only be placed on the material board.");
     if (this.funds() < item[1]) return this.reject("Not enough GP.");
-    if (this.getCell(x, y, "Normal")) return this.reject("Choose an empty square.");
-    this.withdraw(item[1]);
-    const type = id === "suicide-bomber" ? "SuicideBomber" : id === "rook-knight" ? "RookKnight" : id === "bishop-knight" ? "BishopKnight" : id === "knight-queen" ? "KnightQueen" : id === "angry-rook" ? "AngryRook" : id === "super-king" ? "SuperKing" : id === "ball-queen" ? "BallQueen" : id === "super-bishop" ? "SuperBishop" : id === "rook-tower" ? "RookTower" : id[0].toUpperCase() + id.slice(1);
-    const color = NPC_TYPES.has(type) ? COLORS.NPC : this.currentColor();
-    const placed = this.placeNew(type, color, x, y, "Normal");
-    if (!placed) {
-      this.giveGold(item[1]);
-      return this.reject("That piece could not be placed.");
-    }
-    if (type === "Bomb") this.takeAt(x, y, null, "Normal");
-    this.history.push({ type: "buy", id, x, y });
-    this.nextTurn();
+    if (!this.canBuy(id, x, y, boardName)) return this.reject("Choose an empty square.");
+    this.resolve(() => {
+      this.withdraw(item[1]);
+      const type = pieceType(id);
+      this.placeNew(type, NPC_TYPES.has(type) ? COLORS.NPC : this.currentColor(), x, y, "Normal");
+      this.history.push({ type: "buy", id, x, y, board: "Normal" });
+    });
+    this.completeTurn();
     return true;
   }
-  upgrade(toId, x, y, boardName = this.currentBoard) {
-    if (this.gameOver) return this.reject("The game is over.");
+
+  canUpgrade(toId, x, y, boardName = this.currentBoard) {
     const upgrade = UPGRADES.find(entry => entry[0] === toId);
     const piece = this.getCell(x, y, boardName);
-    if (!upgrade || !piece || piece.color !== this.currentColor() || this.funds() < 5 || !upgrade[1].includes(piece.type)) return this.reject("That piece cannot be upgraded here.");
-    this.withdraw(5); const board = piece.board; this.removeGroup(piece, board);
-    const type = toId === "suicide-bomber" ? "SuicideBomber" : toId === "rook-knight" ? "RookKnight" : toId === "bishop-knight" ? "BishopKnight" : toId === "knight-queen" ? "KnightQueen" : toId === "angry-rook" ? "AngryRook" : toId === "super-king" ? "SuperKing" : toId === "ball-queen" ? "BallQueen" : toId === "super-bishop" ? "SuperBishop" : toId === "rook-tower" ? "RookTower" : toId[0].toUpperCase() + toId.slice(1);
-    this.placeNew(type, this.currentColor(), x, y, board);
-    this.history.push({ type: "upgrade", to: toId, x, y });
+    return Boolean(!this.actionBlocked() && upgrade && piece && (!piece.group || piece.part === 0) &&
+      piece.color === this.currentColor() && this.funds() >= 5 && upgrade[1].includes(piece.type) &&
+      this.footprintClear(pieceType(toId), x, y, boardName, piece));
+  }
+
+  upgrade(toId, x, y, boardName = this.currentBoard) {
+    if (this.gameOver) return this.reject("The game is over.");
+    if (this.rulePicker || this.pendingDecision) return this.reject("Resolve the open choice first.");
+    if (!this.canUpgrade(toId, x, y, boardName)) return this.reject("That piece cannot be upgraded here.");
+    this.resolve(() => {
+      this.withdraw(5);
+      this.replacePiece(this.getCell(x, y, boardName), pieceType(toId));
+      this.history.push({ type: "upgrade", to: toId, x, y, board: boardName });
+    });
     return true;
+  }
+
+  replacePiece(piece, type) {
+    return this.resolve(() => {
+      const root = this.leader(piece);
+      if (!root || !this.footprint(type, root.x, root.y).length) return null;
+      const location = locationOf(root);
+      const replacement = this.makePiece(type, root.color);
+      this.copyPieceState(root, replacement);
+      this.removePiece(root);
+      return this.resolveArrival(replacement, location.x, location.y, location.board) === true ? replacement : null;
+    });
   }
   switchBoard() {
     if (this.gameOver) return this.reject("The game is over.");
@@ -418,205 +683,262 @@ export class GameState {
   move(from, to, boardName = this.currentBoard) {
     if (this.gameOver) return this.reject(this.draw ? "The game ended in a draw." : `${this.winner} has already won.`);
     if (this.rulePicker || this.pendingDecision) return this.reject("Resolve the open choice first.");
-    if (!this.validMove(from, to, boardName)) return this.reject("Illegal move.");
-    let piece = this.getCell(from.x, from.y, boardName);
-    if (piece.group && piece.part !== 0) {
-      const leader = this.leader(piece); const offset = { x: piece.x - leader.x, y: piece.y - leader.y };
-      from = { x: leader.x, y: leader.y }; to = { x: to.x - offset.x, y: to.y - offset.y }; piece = leader;
-    }
-    if (!piece || piece.color !== this.currentColor()) return this.reject("It is not that piece's turn.");
-    const target = this.getCell(to.x, to.y, boardName);
-    const captured = target ? this.leader(target) : null;
-    const captureResult = captured ? this.takeAt(to.x, to.y, piece, boardName) : true;
-    if (captureResult === "decision") {
-      this.pendingDecision.continuation = { from, to, board: boardName, pieceUid: piece.uid, capturedUid: captured.uid };
-      if (this.pendingDecision.advancesTurn) this.nextTurn();
-      return true;
-    }
-    if (captureResult === false) { this.nextTurn(); return true; }
-    this.moveGroup(piece, to.x, to.y, boardName);
-    if (piece.type === "Pawn" || piece.type === "SuicideBomber" || piece.type === "Centaur") piece.moved = true;
-    this.afterCapture(piece, captured, to, from, boardName);
-    this.nextTurn();
+    const piece = this.leader(this.getCell(from?.x, from?.y, boardName));
+    if (!piece) return this.reject("Illegal move.");
+    if (piece.color !== this.currentColor()) return this.reject("It is not that piece's turn.");
+    const moving = this.validMove(from, to, boardName);
+    if (!moving && !this.validAttack(from, to, boardName)) return this.reject("Illegal move.");
+    this.resolve(() => {
+      if (moving) {
+        const normalized = this.moveCoordinates(from, to, boardName);
+        const target = this.leader(this.getCell(normalized.to.x, normalized.to.y, boardName));
+        const captured = samePiece(piece, target) ? null : target;
+        if (PAWN_TYPES.has(piece.type)) piece.moved = true;
+        const result = this.resolveArrival(piece, normalized.to.x, normalized.to.y, boardName);
+        if (result === true) this.afterCapture(piece, captured, normalized.to, normalized.from, boardName);
+      } else {
+        this.resolveCapture(this.leader(this.getCell(to.x, to.y, boardName)), piece);
+      }
+      this.history.push({ type: moving ? "move" : "attack", from: { ...from }, to: { ...to }, board: boardName });
+    });
+    this.completeTurn();
     return true;
   }
   afterCapture(piece, captured, to, from, boardName) {
-    const board = this.board(boardName);
+    if (this.findByUid(piece.uid)?.board !== boardName || piece.x !== to.x || piece.y !== to.y) return;
     if (piece.type === "AngryRook") {
       const dx = Math.sign(to.x - from.x), dy = Math.sign(to.y - from.y);
-      for (let i = 1; i < Math.max(Math.abs(to.x - from.x), Math.abs(to.y - from.y)); i++) if (board[from.y + dy * i]?.[from.x + dx * i]) this.takeAt(from.x + dx * i, from.y + dy * i, piece, boardName);
+      for (let i = 1; i < Math.max(Math.abs(to.x - from.x), Math.abs(to.y - from.y)); i++) {
+        if (this.findByUid(piece.uid)?.board !== boardName || piece.x !== to.x || piece.y !== to.y) break;
+        this.resolveCapture(this.leader(this.getCell(from.x + dx * i, from.y + dy * i, boardName)), piece);
+      }
     } else if (piece.type === "Necromancer") {
       if (!captured) return;
       const dx = Math.sign(from.x - to.x), dy = Math.sign(from.y - to.y); const rx = to.x + dx, ry = to.y + dy;
       const resurrected = captured;
-      this.removeGroup(resurrected, resurrected.board);
-      resurrected.color = this.currentColor(); resurrected.group = null; resurrected.part = 0;
-      if (this.getCell(rx, ry, boardName)) this.takeAt(rx, ry, piece, boardName);
-      this.placeGroup(resurrected, rx, ry, boardName);
+      this.removePiece(resurrected);
+      this._resolution.removed.delete(resurrected.uid);
+      if (CONTROLLED_TYPES.has(resurrected.type)) {
+        resurrected.controlledBy = piece.color;
+        resurrected.wildCounterpart ||= resurrected.type;
+        resurrected.movingRight = undefined;
+      }
+      this.setGroupColor(resurrected, piece.color);
+      this.resolveArrival(resurrected, rx, ry, boardName);
     } else if (piece.type === "Zebra") {
       const dx = Math.abs(to.x - from.x) > Math.abs(to.y - from.y) ? Math.sign(to.x - from.x) : 0;
       const dy = dx === 0 ? Math.sign(to.y - from.y) : 0;
-      for (let i = 1; i <= 2; i++) this.takeAt(from.x + dx * i, from.y + dy * i, piece, boardName);
-    } else if (piece.type === "Zombie") {
+      for (let i = 1; i <= 2; i++) {
+        if (this.findByUid(piece.uid)?.board !== boardName || piece.x !== to.x || piece.y !== to.y) break;
+        this.resolveCapture(this.leader(this.getCell(from.x + dx * i, from.y + dy * i, boardName)), piece);
+      }
+    } else if (piece.type === "Zombie" && !piece.controlledBy) {
       if (!captured) return;
       const zombie = this.placeNew("Zombie", COLORS.NPC, from.x, from.y, boardName);
-      zombie.movingRight = piece.movingRight;
-      this.automovingPieces.push(zombie);
-    } else if (piece.type === "Meteor") {
-      this.explode(to.x, to.y, piece, "Normal");
+      if (zombie) {
+        zombie.movingRight = piece.movingRight;
+        this.registerAutomover(zombie);
+      }
+    } else if (piece.type === "Meteor" && captured) {
+      this.explode(to.x, to.y, piece, boardName);
     }
   }
 
   takeAt(x, y, taker, boardName = this.currentBoard) {
-    const target = this.getCell(x, y, boardName);
-    if (!target) return true;
-    const piece = this.leader(target);
-    if (!piece) return true;
-    if (piece.type === "Portal") return this.portalKill(piece, taker, boardName);
-    if (piece.type === "Church") {
-      if (taker) { this.removeGroup(taker, taker.board); this.placeGroup(taker, piece.x, piece.y, "Normal"); }
+    return this.resolve(() => {
+      const choicesBefore = this.decisionCount();
+      const result = this.resolveCapture(this.leader(this.getCell(x, y, boardName)), this.leader(taker));
+      return !result && this.decisionCount() > choicesBefore ? "decision" : result;
+    });
+  }
+
+  resolveCapture(target, attacker, { visited = new Set() } = {}) {
+    if (!target || samePiece(target, attacker)) return true;
+    if (target.type === "Portal" && attacker) {
+      this.portalKill(target, attacker, target.board, visited);
       return false;
     }
-    if (piece.type === "Atheism") {
-      this.pendingDecision = { type: "atheism", title: "God Of Atheism", color: this.currentColor() };
-      this.emit("Atheism demands a choice.", "atheism.png");
-      return "decision";
+    if (target.board === "Heaven" && attacker && this.isNpcPiece(target)) return this.handleHeavenArrival(target, attacker);
+    switch (target.type) {
+      case "Atheism": this.queueDecision("atheism", target); return false;
+      case "Church":
+        if (attacker && target.board !== "Normal") this.resolveArrival(attacker, target.x, target.y, "Normal", visited);
+        return false;
+      case "Whirlpool":
+        if (attacker) this.resolveHit(attacker, null);
+        return false;
+      case "Pittrap":
+        this.resolveDeath(target, null);
+        if (attacker) this.resolveHit(attacker, null);
+        return false;
+      case "Void":
+        if (attacker) {
+          this.detachPiece(attacker);
+          const empty = this.findEmpty("Normal", attacker.type);
+          if (empty) this.resolveArrival(attacker, empty.x, empty.y, "Normal", visited);
+          else this.removePiece(attacker);
+        }
+        return false;
+      default: {
+        const result = this.resolveHit(target, attacker);
+        if (target.type === "Devil") this.queueDecision("devil", target);
+        return result;
+      }
     }
-    if (piece.type === "Angel") {
-      this.pendingDecision = { type: "angel", title: "Free him?", color: this.currentColor() };
-      this.emit("Free him?", "aggro-angel.png");
-      return "decision";
-    }
-    if (piece.type === "Devil") {
-      this.removeGroup(piece, boardName);
-      this.pendingDecision = { type: "devil", title: "The Devil", color: this.currentColor() };
-      this.emit("The Devil offers a bargain.", "devil.png");
-      return true;
-    }
-    let result = true;
-    switch (piece.type) {
-      case "Coin": this.giveGold(4); this.removeGroup(piece, boardName); break;
-      case "Treasure": this.giveGold(15); this.removeGroup(piece, boardName); break;
-      case "Landmine": this.explode(x, y, piece, "Normal"); if (taker) this.removeGroup(taker, "Normal"); result = false; break;
-      case "Pittrap": this.removeGroup(piece, boardName); if (taker) this.removeGroup(taker, boardName); result = false; break;
-      case "Whirlpool": if (taker) this.removeGroup(taker, boardName); result = false; break;
-      case "Bomb": this.removeGroup(piece, boardName); this.explode(x, y, piece, "Normal"); result = true; break;
-      case "Void": if (taker) { this.removeGroup(taker, "Normal"); const empty = this.findEmpty("Normal"); if (empty) this.placeGroup(taker, empty.x, empty.y, "Normal"); } result = false; break;
-      case "SuicideBomber": case "Jester":
-        this.giveGold(1); if (piece.board === "Normal" && this.boards.Heaven) { this.removeGroup(piece, "Normal"); this.placeGroup(piece, piece.x, piece.y, "Heaven"); }
-        this.explode(x, y, piece, boardName); if (taker) this.removeGroup(taker, "Normal"); result = false; break;
-      case "RookTower":
-        for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const near = this.getCell(piece.x + dx, piece.y + dy, boardName); if (near?.color === COLORS.WHITE) near.color = COLORS.BLACK; else if (near?.color === COLORS.BLACK) near.color = COLORS.WHITE; }
-        result = this.baseKill(piece, boardName); break;
-      case "TrojanHorse":
-        for (let dy = -1, spawned = 0; dy <= 1 && spawned < 3; dy++) for (let dx = -1; dx <= 1 && spawned < 3; dx++) if (inBounds(piece.x + dx, piece.y + dy) && !this.getCell(piece.x + dx, piece.y + dy, boardName)) { this.placeNew("Pawn", piece.color, piece.x + dx, piece.y + dy, boardName); spawned++; }
-        result = this.baseKill(piece, boardName); break;
-      case "SuperKing":
-      case "AggroDevil":
-        if (piece.type === "AggroDevil" && taker) this.removeGroup(taker, "Normal");
-        piece.health = (piece.health ?? 1) - 1;
-        if (piece.health > 0) result = false; else { if (piece.type === "SuperKing" && piece.part === 0 && (piece.board === "Hell" || (piece.board === "Normal" && !this.boards.Hell))) this.win(piece.color); result = this.baseKill(piece, boardName); }
-        break;
-      case "King":
-        if (piece.board === "Hell" || (piece.board === "Normal" && !this.boards.Hell)) this.win(piece.color);
-        result = this.baseKill(piece, boardName); break;
-      case "AggroAngel": this.automovingPieces = this.automovingPieces.filter(item => item.uid !== piece.uid); this.removeGroup(piece, boardName); result = true; break;
-      default:
-        if (NPC_TYPES.has(piece.type)) { this.removeGroup(piece, boardName); result = true; }
-        else result = this.baseKill(piece, boardName);
-        break;
-    }
-    if (result && this.rules.includes("NEXT_PIECE_EXPLODES")) {
-      this.rules = this.rules.filter(rule => rule !== "NEXT_PIECE_EXPLODES");
-      this.explode(x, y, piece, boardName); result = false;
-    }
-    return result;
   }
-  baseKill(piece, boardName) {
-    this.removeGroup(piece, boardName);
-    if (piece.board === "Normal" && this.boards.Hell) {
-      const x = piece.x, y = piece.y; piece.board = "Hell"; this.placeGroup(piece, x, y, "Hell"); this.giveGold(1);
-    } else if (piece.board === "Normal") this.giveGold(1);
-    return true;
+
+  resolveHit(piece, attacker, { cause = "capture", location = locationOf(piece) } = {}) {
+    const root = this.leader(piece);
+    if (this._resolution.removed.has(root.uid) || this._resolution.deaths.has(deathKey(root, location))) return true;
+    if (samePiece(root, attacker)) return false;
+    if (["SuperKing", "Angel", "AggroDevil"].includes(root.type) && (root.health ?? 1) > 1) {
+      this.setGroupHealth(root, root.health - 1);
+      if (attacker) this.removePiece(attacker);
+      if (root.type === "Angel" && attacker && cause !== "explosion") this.queueDecision("angel", root);
+      return false;
+    }
+    if (root.type === "AggroDevil" && attacker) this.resolveHit(attacker, null);
+    return this.resolveDeath(root, attacker, location);
   }
-  portalKill(portal, taker, boardName) {
-    if (!taker) return false;
-    this.removeGroup(taker, taker.board);
-    const destination = portal.portalTo || (boardName === "Heaven" ? "Hell" : "Heaven");
-    if (this.boards[destination]) this.placeGroup(taker, portal.x, portal.y, destination);
-    return false;
+
+  resolveDeath(piece, attacker, location = locationOf(piece)) {
+    const identity = deathKey(piece, location);
+    if (this._resolution.removed.has(piece.uid) || this._resolution.deaths.has(identity)) return true;
+    this._resolution.deaths.add(identity);
+    const { board, x, y } = location;
+    const type = piece.type;
+    const nextExplodes = this.rules.includes("NEXT_PIECE_EXPLODES");
+    if (nextExplodes) this.rules = this.rules.filter(rule => rule !== "NEXT_PIECE_EXPLODES");
+    const attackerLocation = attacker && locationOf(attacker);
+
+    if (type === "RookTower") {
+      const flipped = new Set();
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        const near = this.leader(this.getCell(x + dx, y + dy, board));
+        if (!near || flipped.has(near.uid) || near.color === COLORS.NPC) continue;
+        flipped.add(near.uid);
+        this.setGroupColor(near, near.color === COLORS.WHITE ? COLORS.BLACK : COLORS.WHITE);
+      }
+    } else if (type === "TrojanHorse") {
+      let spawned = 0;
+      for (let dy = -1; dy <= 1 && spawned < 3; dy++) for (let dx = -1; dx <= 1 && spawned < 3; dx++) {
+        if (inBounds(x + dx, y + dy) && !this.getCell(x + dx, y + dy, board)) {
+          this.placeNew("Pawn", piece.color, x + dx, y + dy, board);
+          spawned++;
+        }
+      }
+    }
+
+    this.baseKill(piece, location);
+    const stopsAttacker = ["Landmine", "SuicideBomber", "Jester"].includes(type);
+    if (EXPLOSIVE_TYPES.has(type) || nextExplodes) {
+      const forceHit = attacker && (stopsAttacker || !this.findByUid(attacker.uid));
+      const extraTargets = forceHit ? [{ piece: attacker, location: attackerLocation, force: true }] : [];
+      this.explode(x, y, piece, board, extraTargets);
+    }
+    return !stopsAttacker && !nextExplodes;
   }
-  explode(x, y, taker, boardName = this.currentBoard) {
-    const board = this.board(boardName); if (!board) return;
-    this.removeAt(x, y, boardName);
-    if (this._exploding) return;
-    this._exploding = true; this.emit("Explosion", "explosion.png");
-    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) if (dx || dy) this.takeAt(x + dx, y + dy, taker, boardName);
-    this._exploding = false;
+
+  baseKill(piece, location) {
+    const ordinary = !this.isNpcPiece(piece);
+    if (piece.type === "Coin") this.giveGold(4);
+    else if (piece.type === "Treasure") this.giveGold(15);
+    else if (ordinary && location.board === "Normal") this.giveGold(1);
+
+    this.detachPiece(piece);
+    const destination = HEAVEN_DEATH_TYPES.has(piece.type) ? "Heaven" : "Hell";
+    if (ordinary && location.board === "Normal" && this.board(destination)) {
+      // A defeated two-life unit enters its afterlife on its final life.
+      if (piece.health !== undefined) this.setGroupHealth(piece, Math.max(1, piece.health));
+      this.resolveArrival(piece, location.x, location.y, destination);
+    } else this.removePiece(piece);
   }
-  findEmpty(boardName = "Normal") {
-    const spots = []; const board = this.board(boardName); if (!board) return null;
-    for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) if (!board[y][x]) spots.push({ x, y });
+
+  portalKill(portal, taker, boardName, visited = new Set()) {
+    return this.resolve(() => {
+      if (!taker) { this.removePiece(portal); return true; }
+      if (this.evaluatePortalChain(portal.x, portal.y)) { this.removePiece(taker); return false; }
+      const destination = this.portalDestination(portal, boardName);
+      visited.add(`${boardName}:${portal.x},${portal.y}`);
+      if (destination) this.resolveArrival(taker, portal.x, portal.y, destination, visited);
+      else this.removePiece(taker);
+      return false;
+    });
+  }
+
+  explode(x, y, taker, boardName = this.currentBoard, extraTargets = []) {
+    if (!this.board(boardName) || !inBounds(x, y)) return;
+    return this.resolve(() => {
+      const outermost = !this._blast;
+      const blast = this._blast ||= { queue: [], centers: new Set(), hits: new Set() };
+      const center = `${boardName}:${x},${y}`;
+      const targets = [];
+      if (!blast.centers.has(center)) {
+        blast.centers.add(center);
+        const seen = new Set();
+        for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+          const piece = this.leader(this.getCell(x + dx, y + dy, boardName));
+          if (piece && !seen.has(piece.uid)) {
+            seen.add(piece.uid);
+            targets.push({ piece, location: locationOf(piece) });
+          }
+        }
+        this.emit("Explosion", "explosion.png");
+      }
+      blast.queue.push(...targets, ...extraTargets);
+      if (!outermost) return;
+      try {
+        // Breadth-first blasts share a hit set, so a large piece or overlapping
+        // blast is resolved once, and a new explosive still propagates its radius.
+        for (let index = 0; index < blast.queue.length; index++) {
+          const { piece, location, force } = blast.queue[index];
+          const hit = `${location.board}:${piece.uid}`;
+          const current = this.findByUid(piece.uid);
+          if (blast.hits.has(hit) || this._resolution.removed.has(piece.uid) ||
+              this._resolution.deaths.has(deathKey(piece, location)) ||
+              (current && current.board !== location.board) || (!current && !force)) continue;
+          blast.hits.add(hit);
+          this.resolveHit(piece, null, { cause: "explosion", location });
+        }
+      } finally {
+        this._blast = null;
+      }
+    });
+  }
+  findEmpty(boardName = "Normal", type = "Pawn") {
+    const spots = [];
+    if (!this.board(boardName)) return null;
+    for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) if (this.footprintClear(type, x, y, boardName)) spots.push({ x, y });
     return spots.length ? spots[this.random.nextInt(spots.length)] : null;
-  }
-  win(color) {
-    this.winner = color === COLORS.WHITE ? "Black" : "White";
-    this.gameOver = true;
-    this.draw = false;
-    this.drawOffer = null;
-    this.rulePicker = false;
-    this.pendingDecision = null;
-    this.endReason = "king-death";
-    this.emit(`${this.winner} wins!`);
   }
 
   drawGame(message = "Game drawn.") {
-    this.winner = null;
+    this.finishGame(null, "draw", message);
+  }
+
+  finishGame(winner, reason, message) {
+    this.winner = winner;
     this.gameOver = true;
-    this.draw = true;
+    this.draw = winner === null;
     this.drawOffer = null;
     this.rulePicker = false;
+    this.rulePickerColor = null;
     this.pendingDecision = null;
-    this.endReason = "draw";
+    this._decisionQueue = [];
+    this._turnPending = false;
+    this._automoveQueue = null;
+    this.endReason = reason;
     this.emit(message);
   }
 
-  kingColorsOn(boardName) {
-    const board = this.board(boardName);
-    if (!board) return new Set();
-    const colors = new Set();
-    const seen = new Set();
-    for (const row of board) for (const piece of row) {
-      if (!piece || !["King", "SuperKing"].includes(piece.type)) continue;
-      const leader = this.leader(piece);
-      const identity = leader.group || leader.uid;
-      if (seen.has(identity)) continue;
-      seen.add(identity);
-      colors.add(leader.color);
-    }
-    return colors;
-  }
-
   destroyHell() {
-    if (!this.boards.Hell) return false;
-    const kingColors = this.kingColorsOn("Hell");
-    this.boards.Hell = null;
-    if (this.currentBoard === "Hell") this.currentBoard = "Normal";
-    if (kingColors.size > 1) this.drawGame("Both kings were in Hell. Game drawn.");
-    else if (kingColors.size === 1) this.win([...kingColors][0]);
-    return true;
+    return this.destroyDimension("Hell", "Hell was destroyed.");
   }
 
   resign(color) {
-    if (!this.online || this.gameOver) return this.reject("The game cannot be resigned.");
-    this.winner = color === COLORS.WHITE ? COLORS.BLACK : COLORS.WHITE;
-    this.gameOver = true;
-    this.draw = false;
-    this.drawOffer = null;
-    this.rulePicker = false;
-    this.pendingDecision = null;
-    this.endReason = "resignation";
-    this.emit(`${color} resigns. ${this.winner} wins!`);
+    if (!this.online || this.gameOver || ![COLORS.WHITE, COLORS.BLACK].includes(color)) return this.reject("The game cannot be resigned.");
+    const winner = color === COLORS.WHITE ? COLORS.BLACK : COLORS.WHITE;
+    this.finishGame(winner, "resignation", `${color} resigns. ${winner} wins!`);
     return true;
   }
 
@@ -633,47 +955,65 @@ export class GameState {
     const offeredBy = this.drawOffer;
     this.drawOffer = null;
     if (accept) {
-      this.gameOver = true;
-      this.draw = true;
-      this.winner = null;
-      this.rulePicker = false;
-      this.pendingDecision = null;
-      this.endReason = "agreement";
-      this.emit("Game drawn by agreement.");
+      this.finishGame(null, "agreement", "Game drawn by agreement.");
     } else {
       this.emit(`${color} declined the draw offer from ${offeredBy}.`);
     }
     return true;
   }
 
-  decision(choice) {
-    const decision = this.pendingDecision; if (!decision) return this.reject("No decision is pending.");
-    this.pendingDecision = null;
-    if (decision.type === "atheism") {
-      if (choice === "heaven") { this.boards.Heaven = null; if (this.currentBoard === "Heaven") this.currentBoard = "Normal"; }
-      else if (choice === "hell") this.destroyHell();
-      else if (choice === "metaphysical") for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) if (["Angel", "Devil"].includes(this.getCell(x, y, "Normal")?.type)) this.removeGroup(this.getCell(x, y, "Normal"), "Normal");
-    } else if (decision.type === "angel") {
-      if (choice === "yes") { const angel = this.findByUid(decision.continuation?.capturedUid); if (angel) this.removeGroup(angel, angel.board); const aggro = this.placeNew("AggroAngel", COLORS.NPC, 3, 3, "Normal"); this.automovingPieces.push(aggro); }
-      if (choice === "no") this.nextTurn();
-    } else if (decision.type === "devil") {
-      if (choice === "release") { const devil = this.placeNew("AggroDevil", COLORS.NPC, 3, 3, "Normal"); this.automovingPieces.push(devil); }
-      else if (choice === "gold") { if (this.whiteToMove) { this.whiteGP += 10; this.blackGP += 5; } else { this.whiteGP += 5; this.blackGP += 10; } }
-    }
-    if (decision.type === "angel" && choice === "yes") this.finishInterruptedMove(decision.continuation);
-    if (decision.type === "atheism") this.nextTurn();
-    return true;
+  decisionCount() { return (this.pendingDecision ? 1 : 0) + this._decisionQueue.length; }
+
+  queueDecision(type, target) {
+    const existing = [this.pendingDecision, ...this._decisionQueue].filter(Boolean);
+    if (existing.some(choice => choice.type === type && choice.targetUid === target.uid)) return;
+    const titles = { angel: "Free him?", atheism: "God Of Atheism", devil: "The Devil" };
+    const decision = {
+      id: this._nextDecisionId++, type, title: titles[type], color: this.currentColor(),
+      targetUid: target.uid, angelUid: type === "angel" ? target.uid : undefined
+    };
+    if (this.pendingDecision) this._decisionQueue.push(decision);
+    else this.pendingDecision = decision;
+    this.emit(titles[type], type === "angel" ? "aggro-angel.png" : `${type}.png`);
   }
-  finishInterruptedMove(continuation) {
-    if (!continuation) { this.nextTurn(); return; }
-    const piece = this.findByUid(continuation.pieceUid); if (!piece) { this.nextTurn(); return; }
-    const captured = this.findByUid(continuation.capturedUid);
-    if (captured) this.removeGroup(captured, captured.board);
-    const boardName = continuation.board || this.currentBoard;
-    this.moveGroup(piece, continuation.to.x, continuation.to.y, boardName);
-    if (PAWN_TYPES.has(piece.type)) piece.moved = true;
-    this.afterCapture(piece, captured, continuation.to, continuation.from, boardName);
-    this.nextTurn();
+
+  decision(choice) {
+    const decision = this.pendingDecision;
+    if (this.gameOver || !decision) return this.reject("No decision is pending.");
+    if (!DECISION_CHOICES[decision.type]?.includes(choice)) return this.reject("That choice is not available.");
+    const releaseType = decision.type === "angel" && choice === "yes" ? "AggroAngel"
+      : decision.type === "devil" && choice === "release" ? "AggroDevil" : null;
+    let spot = null;
+    if (releaseType) {
+      spot = this.footprintClear(releaseType, 3, 3, "Normal") ? { x: 3, y: 3 } : this.findEmpty("Normal", releaseType);
+      if (!spot) return this.reject("There is no empty space on Normal to release this piece.");
+    }
+    this.resolve(() => {
+      this.pendingDecision = this._decisionQueue.shift() || null;
+      if (decision.type === "atheism") {
+        if (choice === "heaven") this.destroyDimension("Heaven", "Heaven was destroyed.");
+        else if (choice === "hell") this.destroyHell();
+        else {
+          for (const piece of new Set((this.board("Normal") || []).flat().filter(Boolean).map(piece => this.leader(piece)))) {
+            if (["Angel", "Devil"].includes(piece.type)) this.removePiece(piece);
+          }
+        }
+      } else if (releaseType) {
+        this.removePiece(this.findByUid(decision.targetUid));
+        const active = this.placeNew(releaseType, COLORS.NPC, spot.x, spot.y, "Normal");
+        this.registerAutomover(active);
+      } else if (decision.type === "devil" && choice === "gold") {
+        this.giveGold(10, decision.color);
+        this.giveGold(5, decision.color === COLORS.WHITE ? COLORS.BLACK : COLORS.WHITE);
+      }
+      // Java's Devil "remove" and "smite" buttons have no gameplay handlers.
+      this.history.push({ type: "decision", decision: decision.type, choice });
+    });
+    if (!this.gameOver && !this.pendingDecision) {
+      if (this._turnPending) { this._turnPending = false; this.nextTurn(); }
+      else if (this._automoveQueue) this.finishTurnAutomovers();
+    }
+    return true;
   }
   findByUid(uid) {
     for (const boardName of BOARD_NAMES) { const board = this.board(boardName); if (!board) continue; for (const row of board) for (const piece of row) if (piece?.uid === uid) return this.leader(piece); }
@@ -682,29 +1022,74 @@ export class GameState {
 
   addRule(rule) {
     if (this.gameOver) return this.reject("The game is over.");
+    if (this.pendingDecision) return this.reject("Resolve the open choice first.");
     if (!RULES.includes(rule)) return this.reject("Unknown rule.");
+    return this.resolve(() => this.applyRule(rule));
+  }
+
+  applyRule(rule) {
     this.rulePicker = false; this.rulePickerColor = null; this.turnsSinceNewRule = 0;
     switch (rule) {
       case "MORE_GOLD": this.whiteGP += 10; this.blackGP += 10; this.emit("EVERYONE GETS +10GP!"); break;
-      case "GOLD_RUSH": this.emit("GOLD RUSH!"); for (let i = 0; i < 5; i++) { const p = { x: this.random.inclusive(0, 7), y: this.random.inclusive(0, 7) }; if (!this.getCell(p.x, p.y, "Normal")) this.placeNew("Coin", COLORS.NPC, p.x, p.y, "Normal"); } break;
+      case "GOLD_RUSH": {
+        const spawned = this.spawnRandomEmpty("Coin", 5, "Normal");
+        this.emit(`GOLD RUSH: ${spawned} coin${spawned === 1 ? "" : "s"} spawned.`, "coin.png");
+        break;
+      }
       case "UNICORNS": this.replaceMatching(KNIGHT_TYPES, "Unicorn"); break;
       case "BISHOPS_GAIN_NECROMANCY": this.replaceMatching(BISHOP_TYPES, "Necromancer"); break;
-      case "PORTALS_OPEN": { const heaven = this.placeNew("Portal", COLORS.NPC, 0, 4, "Normal"); heaven.portalTo = "Heaven"; const hell = this.placeNew("Portal", COLORS.NPC, 7, 3, "Normal"); hell.portalTo = "Hell"; } break;
-      case "PAWN_UPGRADE": { let white = false, black = false; for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) { const p = this.getCell(x, y, "Normal"); if (p && PAWN_TYPES.has(p.type) && ((p.color === COLORS.WHITE && !white) || (p.color === COLORS.BLACK && !black))) { this.removeGroup(p, "Normal"); this.placeNew("Centaur", p.color, x, y, "Normal"); if (p.color === COLORS.WHITE) white = true; else black = true; } } } break;
-      case "TREASURE": this.placeNew("Treasure", COLORS.NPC, this.random.inclusive(0, 7), this.random.inclusive(3, 4), "Normal"); break;
+      case "PORTALS_OPEN": {
+        this.placeNew("Portal", COLORS.NPC, 0, 4, "Normal", { portalTo: "Heaven" });
+        this.placeNew("Portal", COLORS.NPC, 7, 3, "Normal", { portalTo: "Hell" });
+        break;
+      }
+      case "PAWN_UPGRADE": {
+        const upgraded = new Set();
+        for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) {
+          const piece = this.getCell(x, y, "Normal");
+          if (piece && PAWN_TYPES.has(piece.type) && !upgraded.has(piece.color)) {
+            this.replacePiece(piece, "Centaur");
+            upgraded.add(piece.color);
+          }
+        }
+        break;
+      }
+      case "TREASURE": {
+        const spots = [];
+        if (this.board("Normal")) for (let x = 0; x < 8; x++) for (const y of [3, 4]) if (!this.getCell(x, y, "Normal")) spots.push({ x, y });
+        if (spots.length) {
+          const spot = spots[this.random.nextInt(spots.length)];
+          this.placeNew("Treasure", COLORS.NPC, spot.x, spot.y, "Normal");
+          this.emit("Treasure appeared.", "treasure.png");
+        } else {
+          this.emit("No empty square was available for Treasure.", "treasure.png");
+        }
+        break;
+      }
       case "LANDMINES": case "PITTRAPS": {
         const type = rule === "LANDMINES" ? "Landmine" : "Pittrap";
         const spawned = this.spawnRandomEmpty(type, 3, "Normal");
         this.emit(`${spawned} ${rule === "LANDMINES" ? "landmines" : "pittraps"} spawned.`);
         break;
       }
-      case "WILD_LIFE": { const a = this.placeNew("Wildlife", COLORS.NPC, 0, 3, "Normal"); if (a) a.movingRight = true; const b = this.placeNew("Wildlife", COLORS.NPC, 7, 4, "Normal"); if (b) b.movingRight = false; this.automovingPieces.push(a, b); } break;
-      case "WILD_HORSE": { const p = this.placeNew("WildHorse", COLORS.NPC, 4, 3, "Normal"); if (p) this.automovingPieces.push(p); } break;
-      case "ZOMBIE_APOCALYPSE": for (const [x, y, right] of [[0, 3, true], [0, 4, true], [7, 3, false], [7, 4, false]]) { const p = this.placeNew("Zombie", COLORS.NPC, x, y, "Normal"); if (p) { p.movingRight = right; this.automovingPieces.push(p); } } break;
-      case "EVERYONE_UPGRADES": for (let i = 0; i < 8; i++) { const x = this.random.inclusive(0, 7), y = this.random.inclusive(0, 7), p = this.getCell(x, y, "Normal"); if (!p || p.color === COLORS.NPC) continue; const map = { Pawn: "SuicideBomber", Knight: "TrojanHorse", Rook: "RookTower", Queen: "BallQueen", King: "King", Bishop: "Necromancer" }; const type = map[p.type] || "Jester"; this.removeGroup(p, "Normal"); this.placeNew(type, p.color, x, y, "Normal"); } break;
+      case "WILD_LIFE":
+        for (const [x, y, movingRight] of [[0, 3, true], [7, 4, false]]) this.registerAutomover(this.placeNew("Wildlife", COLORS.NPC, x, y, "Normal", { movingRight }));
+        break;
+      case "WILD_HORSE": this.registerAutomover(this.placeNew("WildHorse", COLORS.NPC, 4, 3, "Normal")); break;
+      case "ZOMBIE_APOCALYPSE":
+        for (const [x, y, movingRight] of [[0, 3, true], [0, 4, true], [7, 3, false], [7, 4, false]]) this.registerAutomover(this.placeNew("Zombie", COLORS.NPC, x, y, "Normal", { movingRight }));
+        break;
+      case "EVERYONE_UPGRADES":
+        for (let i = 0; i < 8; i++) {
+          const piece = this.leader(this.getCell(this.random.inclusive(0, 7), this.random.inclusive(0, 7), "Normal"));
+          if (!piece || piece.color === COLORS.NPC) continue;
+          const map = { Pawn: "SuicideBomber", Knight: "TrojanHorse", Rook: "RookTower", Queen: "BallQueen", King: "King", Bishop: "Necromancer" };
+          this.replacePiece(piece, map[piece.type] || "Jester");
+        }
+        break;
       case "WHIRLPOOL": this.placeNew("Whirlpool", COLORS.NPC, 3 + this.random.inclusive(0, 1), 3 + this.random.inclusive(0, 1), "Normal"); break;
       case "VOID": this.placeNew("Void", COLORS.NPC, 3, 3, "Normal"); break;
-      case "METEOR_SHOWER": { const p = this.placeNew("Meteor", COLORS.NPC, 0, 2, "Normal"); if (p) this.automovingPieces.push(p); } break;
+      case "METEOR_SHOWER": this.registerAutomover(this.placeNew("Meteor", COLORS.NPC, 0, 2, "Normal")); break;
     }
     if (!EVENT_RULES.has(rule) && !this.rules.includes(rule)) this.rules.push(rule);
     this.availableRules = this.availableRules.filter(item => item !== rule);
@@ -712,7 +1097,10 @@ export class GameState {
     return true;
   }
   replaceMatching(types, replacement) {
-    for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) { const p = this.getCell(x, y, "Normal"); if (p && types.has(p.type)) { const color = p.color; this.removeGroup(p, "Normal"); this.placeNew(replacement, color, x, y, "Normal"); } }
+    this.resolve(() => {
+      const pieces = new Set((this.board("Normal") || []).flat().filter(Boolean).map(piece => this.leader(piece)));
+      for (const piece of pieces) if (types.has(piece.type)) this.replacePiece(piece, replacement);
+    });
   }
   spawnRandomEmpty(type, count, boardName = "Normal") {
     const board = this.board(boardName);
@@ -728,10 +1116,27 @@ export class GameState {
     return spawned;
   }
 
-  nextTurn() {
+  completeTurn() {
     if (this.gameOver) return;
-    this.whiteToMove = !this.whiteToMove; this.turnsSinceNewRule++;
-    for (const piece of [...this.automovingPieces]) this.automove(piece);
+    if (this.pendingDecision) this._turnPending = true;
+    else this.nextTurn();
+  }
+
+  nextTurn() {
+    if (this.actionBlocked()) return;
+    this.whiteToMove = !this.whiteToMove;
+    this.turnsSinceNewRule++;
+    this._automoveQueue = this.automovingPieces.filter(Boolean).map(piece => piece.uid);
+    this.finishTurnAutomovers();
+  }
+
+  finishTurnAutomovers() {
+    while (this._automoveQueue?.length && !this.gameOver && !this.pendingDecision) {
+      const piece = this.findByUid(this._automoveQueue.shift());
+      if (piece) this.automove(piece);
+    }
+    if (this.gameOver || this.pendingDecision) return;
+    this._automoveQueue = null;
     if (this.turnsSinceNewRule >= this.rules.length * 2 && this.availableRules.length) {
       this.rulePicker = true;
       this.rulePickerColor = this.nextRulePickerColor;
@@ -739,8 +1144,18 @@ export class GameState {
       this.turnsSinceNewRule = 0;
     }
   }
+  registerAutomover(piece) {
+    if (piece && AUTOMOVING_TYPES.has(piece.type) && !piece.controlledBy && this.findByUid(piece.uid) &&
+        !this.automovingPieces.some(item => item.uid === piece.uid)) this.automovingPieces.push(piece);
+  }
+
   automove(piece) {
-    const current = this.findByUid(piece.uid); if (!current || current.board !== "Normal") return;
+    const current = piece && this.findByUid(piece.uid);
+    if (!current || current.controlledBy || current.board !== "Normal" || this.gameOver || this.pendingDecision) return;
+    return this.resolve(() => this.resolveAutomove(current));
+  }
+
+  resolveAutomove(current) {
     const from = { x: current.x, y: current.y }; let to = null;
     if (current.type === "Wildlife") to = { x: current.x + (current.movingRight ? 1 : -1), y: current.y };
     else if (current.type === "Zombie") { to = { x: current.x + (current.movingRight ? 1 : -1), y: current.y }; if (this.getCell(to.x, to.y, "Normal")?.type === "Zombie") { current.movingRight = !current.movingRight; to = { x: current.x + (current.movingRight ? 1 : -1), y: current.y }; } }
@@ -754,8 +1169,7 @@ export class GameState {
       const shift = (x, y) => {
         const source = this.getCell(x, y, "Normal");
         if (source && !LARGE_TYPES.has(source.type) && !this.getCell(x + dx, y + dy, "Normal")) {
-          this.removeGroup(source, "Normal");
-          this.placeGroup(source, x + dx, y + dy, "Normal");
+          this.resolveArrival(source, x + dx, y + dy, "Normal");
         }
       };
       if (direction === 1) for (let y = 0; y < 8; y++) for (let x = 6; x >= 0; x--) shift(x, y);
@@ -764,27 +1178,61 @@ export class GameState {
       if (direction === 4) for (let y = 1; y < 8; y++) for (let x = 0; x < 8; x++) shift(x, y);
       return;
     }
-    if (!to || !inBounds(to.x, to.y)) { if (current.type === "Wildlife" && (current.x === 0 || current.x === 7)) current.movingRight = current.x === 0; return; }
+    if (!to || !inBounds(to.x, to.y)) {
+      if (["Wildlife", "Zombie"].includes(current.type) && (current.x === 0 || current.x === 7)) current.movingRight = current.x === 0;
+      return;
+    }
     if (this.validMove(from, to, "Normal")) {
       const oldTarget = this.getCell(to.x, to.y, "Normal");
       const captured = oldTarget ? this.leader(oldTarget) : null;
-      const result = oldTarget ? this.takeAt(to.x, to.y, current, "Normal") : true;
-      if (result === true) { this.moveGroup(current, to.x, to.y, "Normal"); this.afterCapture(current, captured, to, from, "Normal"); }
-      if (current.type === "Wildlife" && (current.x === 0 || current.x === 7)) current.movingRight = current.x === 0;
+      const result = this.resolveArrival(current, to.x, to.y, "Normal");
+      if (result === true) this.afterCapture(current, captured, to, from, "Normal");
+      if (["Wildlife", "Zombie"].includes(current.type) && (current.x === 0 || current.x === 7)) current.movingRight = current.x === 0;
     }
   }
 
   toSnapshot() {
     const serialize = boardName => {
       const board = this.board(boardName); if (!board) return null;
-      return board.map(row => row.map(piece => piece ? { uid: piece.uid, type: piece.type, color: piece.color, part: piece.part, group: piece.group, x: piece.x, y: piece.y, health: piece.health, moved: piece.moved, movingRight: piece.movingRight, portalTo: piece.portalTo, board: piece.board } : null));
+      return board.map(row => row.map(piece => piece ? { uid: piece.uid, type: piece.type, color: piece.color, part: piece.part, group: piece.group, x: piece.x, y: piece.y, health: piece.health, moved: piece.moved, movingRight: piece.movingRight, portalTo: piece.portalTo, controlledBy: piece.controlledBy, wildCounterpart: piece.wildCounterpart, board: piece.board } : null));
     };
-    return { online: this.online, mode: this.mode, currentBoard: this.currentBoard, whiteToMove: this.whiteToMove, whiteGP: this.whiteGP, blackGP: this.blackGP, rules: [...this.rules], availableRules: [...this.availableRules], rulePicker: this.rulePicker, rulePickerColor: this.rulePickerColor, nextRulePickerColor: this.nextRulePickerColor, pendingDecision: this.pendingDecision ? { type: this.pendingDecision.type, title: this.pendingDecision.title, color: this.pendingDecision.color, advancesTurn: this.pendingDecision.advancesTurn, continuation: this.pendingDecision.continuation } : null, winner: this.winner, gameOver: this.gameOver, draw: this.draw, drawOffer: this.drawOffer, endReason: this.endReason, lastEvent: this.lastEvent, automovingUids: this.automovingPieces.map(piece => piece.uid), boards: { Normal: serialize("Normal"), Heaven: serialize("Heaven"), Hell: serialize("Hell") }, history: this.history.slice(-100) };
+    return {
+      online: this.online, mode: this.mode, seed: this.seed, randomState: this.random.seed.toString(),
+      nextUid: this.nextUid, nextGroup: this.nextGroup, currentBoard: this.currentBoard,
+      whiteToMove: this.whiteToMove, whiteGP: this.whiteGP, blackGP: this.blackGP,
+      rules: [...this.rules], availableRules: [...this.availableRules], turnsSinceNewRule: this.turnsSinceNewRule,
+      rulePicker: this.rulePicker, rulePickerColor: this.rulePickerColor, nextRulePickerColor: this.nextRulePickerColor,
+      pendingDecision: structuredClone(this.pendingDecision), decisionQueue: structuredClone(this._decisionQueue),
+      nextDecisionId: this._nextDecisionId, turnPending: this._turnPending, automoveQueue: this._automoveQueue && [...this._automoveQueue],
+      winner: this.winner, gameOver: this.gameOver, draw: this.draw, drawOffer: this.drawOffer,
+      endReason: this.endReason, lastEvent: this.lastEvent && { ...this.lastEvent },
+      automovingUids: this.automovingPieces.filter(piece => !piece.controlledBy && this.findByUid(piece.uid)).map(piece => piece.uid),
+      boards: { Normal: serialize("Normal"), Heaven: serialize("Heaven"), Hell: serialize("Hell") },
+      history: structuredClone(this.history.slice(-100))
+    };
   }
 
   static fromSnapshot(snapshot) {
     const game = Object.create(GameState.prototype);
-    Object.assign(game, { online: snapshot.online, mode: snapshot.mode, currentBoard: snapshot.currentBoard, whiteToMove: snapshot.whiteToMove, whiteGP: snapshot.whiteGP, blackGP: snapshot.blackGP, rules: [...snapshot.rules], availableRules: [...(snapshot.availableRules || RULE_PICKER)], rulePicker: snapshot.rulePicker, rulePickerColor: snapshot.rulePickerColor || null, nextRulePickerColor: snapshot.nextRulePickerColor || COLORS.WHITE, pendingDecision: snapshot.pendingDecision, winner: snapshot.winner, gameOver: Boolean(snapshot.gameOver), draw: Boolean(snapshot.draw), drawOffer: snapshot.drawOffer || null, endReason: snapshot.endReason || null, lastEvent: snapshot.lastEvent, eventId: snapshot.lastEvent?.id || 0, history: snapshot.history || [], automovingPieces: [], nextUid: 1, nextGroup: 1, turnsSinceNewRule: 0, _exploding: false, boards: { Normal: blankBoard(), Heaven: blankBoard(), Hell: blankBoard() }, random: new JavaRandom(1n) });
+    Object.assign(game, {
+      online: snapshot.online, mode: snapshot.mode, seed: snapshot.seed || "snapshot",
+      currentBoard: snapshot.currentBoard, whiteToMove: snapshot.whiteToMove, whiteGP: snapshot.whiteGP, blackGP: snapshot.blackGP,
+      rules: [...snapshot.rules], availableRules: [...(snapshot.availableRules || RULE_PICKER)],
+      rulePicker: snapshot.rulePicker, rulePickerColor: snapshot.rulePickerColor || null,
+      nextRulePickerColor: snapshot.nextRulePickerColor || COLORS.WHITE, turnsSinceNewRule: snapshot.turnsSinceNewRule || 0,
+      pendingDecision: structuredClone(snapshot.pendingDecision || null), _decisionQueue: structuredClone(snapshot.decisionQueue || []),
+      _nextDecisionId: snapshot.nextDecisionId || 1, _turnPending: Boolean(snapshot.turnPending),
+      _automoveQueue: snapshot.automoveQueue ? [...snapshot.automoveQueue] : null,
+      winner: snapshot.winner, gameOver: Boolean(snapshot.gameOver), draw: Boolean(snapshot.draw),
+      drawOffer: snapshot.drawOffer || null, endReason: snapshot.endReason || null,
+      lastEvent: snapshot.lastEvent && { ...snapshot.lastEvent }, eventId: snapshot.lastEvent?.id || 0,
+      history: structuredClone(snapshot.history || []), automovingPieces: [],
+      nextUid: snapshot.nextUid || 1, nextGroup: snapshot.nextGroup || 1,
+      _resolutionDepth: 0, _resolution: null, _blast: null, initializing: false,
+      boards: { Normal: blankBoard(), Heaven: blankBoard(), Hell: blankBoard() },
+      random: new JavaRandom(hashSeed(snapshot.seed || "snapshot"))
+    });
+    if (snapshot.randomState !== undefined) game.random.seed = BigInt(snapshot.randomState);
     for (const boardName of BOARD_NAMES) {
       const rows = snapshot.boards[boardName]; if (!rows) { game.boards[boardName] = null; continue; }
       for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) { const piece = rows[y][x]; if (piece) { game.boards[boardName][y][x] = { ...piece }; game.nextUid = Math.max(game.nextUid, piece.uid + 1); game.nextGroup = Math.max(game.nextGroup, Number(String(piece.group || "g0").slice(1)) + 1); } }
@@ -793,9 +1241,15 @@ export class GameState {
       const board = game.board(boardName); if (!board) continue;
       const groups = new Map();
       for (const row of board) for (const piece of row) if (piece?.group) { if (!groups.has(piece.group)) groups.set(piece.group, []); groups.get(piece.group)[piece.part] = piece; }
-      for (const parts of groups.values()) if (parts[0]) parts[0].related = parts;
+      for (const parts of groups.values()) if (parts[0]) {
+        parts[0].related = parts;
+        for (const part of parts) {
+          part.color = parts[0].color;
+          game.copyPieceState(parts[0], part);
+        }
+      }
     }
-    game.automovingPieces = (snapshot.automovingUids || []).map(uid => game.findByUid(uid)).filter(Boolean);
+    for (const uid of snapshot.automovingUids || []) game.registerAutomover(game.findByUid(uid));
     return game;
   }
 }
@@ -805,6 +1259,7 @@ export function imageKey(piece) {
   const large = LARGE_TYPES.has(piece.type);
   const rootName = piece.type === "SuicideBomber" ? "suicide-bomber" : piece.type === "KnightQueen" ? "knight-queen" : piece.type === "BishopKnight" ? "bishop-knight" : piece.type === "RookKnight" ? "rook-knight" : piece.type === "AngryRook" ? "angry-rook" : piece.type === "SuperKing" ? "super-king" : piece.type === "SuperBishop" ? "super-bishop" : piece.type === "BallQueen" ? "ball-queen" : piece.type === "RookTower" ? "rook-tower" : piece.type === "TrojanHorse" ? "trojan-horse" : piece.type.toLowerCase();
   if (large) {
+    if (piece.type === "SuperKing" && piece.color === COLORS.BLACK) return "black/super-king.png";
     const base = piece.type === "SuperKing" ? (piece.color === COLORS.WHITE ? "white/super-king" : "black/super-king") : piece.type === "AggroAngel" ? "aggro-angel" : piece.type === "AggroDevil" ? "devil" : piece.type.toLowerCase();
     return `${base}${piece.part}.png`;
   }

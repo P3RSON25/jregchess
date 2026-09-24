@@ -79,7 +79,7 @@ function handleServerMessage(message) {
   if (message.type === "state") {
     room = message.room; localRole = message.role || localRole; connected = true; roomConnections = message.connected || roomConnections;
     game = GameState.fromSnapshot(message.state);
-    if (!game.board(viewBoard)) viewBoard = "Normal";
+    if (!game.board(viewBoard)) viewBoard = game.activeBoardNames()[0] || "Normal";
     if (message.state.lastEvent?.id > lastEventId) { lastEventId = message.state.lastEvent.id; displayEvent(message.state.lastEvent); }
     selected = null;
     render();
@@ -97,7 +97,7 @@ function sendAction(action) {
 function applyLocal(action) {
   let accepted = false;
   if (action.action === "move") accepted = game.move(action.from, action.to, action.board || viewBoard);
-  if (action.action === "buy") accepted = game.buy(action.id, action.x, action.y);
+  if (action.action === "buy") accepted = game.buy(action.id, action.x, action.y, action.board || viewBoard);
   if (action.action === "upgrade") accepted = game.upgrade(action.id, action.x, action.y, action.board || viewBoard);
   if (action.action === "rule") accepted = game.addRule(action.rule);
   if (action.action === "decision") accepted = game.decision(action.choice);
@@ -118,7 +118,7 @@ function fallbackLabel(piece) {
 
 function render() {
   if (!game) return;
-  if (!game.board(viewBoard)) viewBoard = "Normal";
+  if (!game.board(viewBoard)) viewBoard = game.activeBoardNames()[0] || "Normal";
   const boardName = viewBoard;
   $("#game-title").textContent = game.draw ? "Draw" : game.gameOver ? `${game.winner} wins` : `${game.whiteToMove ? "White" : "Black"} to move`;
   $("#board-name").textContent = boardName;
@@ -146,8 +146,10 @@ function render() {
     tile.className = `tile ${squareClass(boardName, x, y)}`;
     if (selected?.x === x && selected?.y === y) tile.classList.add("selected");
     else if (legal.has(`${x},${y}`)) tile.classList.add("legal");
-    if (canAct() && shopItem && boardName === "Normal" && !piece && game.funds() >= shopItem[1]) tile.classList.add("purchase-target");
-    if (canAct() && upgradeItem && piece && piece.color === currentColor() && game.funds() >= 5 && upgradeItem[1].includes(piece.type)) tile.classList.add("upgrade-target");
+    if (canAct() && shopItem && game.canBuy(shopItem[0], x, y, boardName)) tile.classList.add("purchase-target");
+    if (canAct() && upgradeItem && game.canUpgrade(upgradeItem[0], x, y, boardName)) tile.classList.add("upgrade-target");
+    tile.dataset.x = x;
+    tile.dataset.y = y;
     tile.setAttribute("role", "gridcell");
     tile.setAttribute("aria-label", `${String.fromCharCode(97 + x)}${8 - y}${board?.[y]?.[x] ? ` ${board[y][x].type}` : " empty"}`);
     tile.addEventListener("click", () => handleTile(displayX, displayY));
@@ -186,30 +188,26 @@ function renderLargePiece(layer, piece, board) {
   overlay.className = "piece-overlay";
   overlay.style.gridColumn = `${displayX + 1} / span ${width}`;
   overlay.style.gridRow = `${displayY + 1} / span ${height}`;
+  if (isMirrored()) overlay.style.transform = "rotate(180deg)";
   const canvas = document.createElement("canvas");
   canvas.className = "piece-composite";
   canvas.width = width * 64;
   canvas.height = height * 64;
   canvas.setAttribute("aria-label", piece.type);
   const context = canvas.getContext("2d");
-  for (let displayYPart = 0; displayYPart < height; displayYPart++) for (let displayXPart = 0; displayXPart < width; displayXPart++) {
-    const partX = isMirrored() ? piece.x + width - 1 - displayXPart : piece.x + displayXPart;
-    const partY = isMirrored() ? piece.y + height - 1 - displayYPart : piece.y + displayYPart;
-    const part = board?.[partY]?.[partX];
-    if (!part) continue;
+  // The original assets contain only a full Black Super King, not numbered tiles.
+  if (piece.type === "SuperKing" && piece.color === COLORS.BLACK) {
     const img = new Image();
-    img.onload = () => {
-      context.save();
-      if (isMirrored()) {
-        context.translate((displayXPart + 1) * 64, (displayYPart + 1) * 64);
-        context.rotate(Math.PI);
-        context.drawImage(img, -64, -64, 64, 64);
-      } else {
-        context.drawImage(img, displayXPart * 64, displayYPart * 64, 64, 64);
-      }
-      context.restore();
-    };
-    img.src = asset(imageKey(part));
+    img.onload = () => context.drawImage(img, 0, 0, canvas.width, canvas.height);
+    img.src = asset("black/super-king.png");
+  } else {
+    for (let displayYPart = 0; displayYPart < height; displayYPart++) for (let displayXPart = 0; displayXPart < width; displayXPart++) {
+      const part = board?.[piece.y + displayYPart]?.[piece.x + displayXPart];
+      if (!part) continue;
+      const img = new Image();
+      img.onload = () => context.drawImage(img, displayXPart * 64, displayYPart * 64, 64, 64);
+      img.src = asset(imageKey(part));
+    }
   }
   overlay.append(canvas);
   layer.append(overlay);
@@ -219,7 +217,7 @@ function handleTile(x, y) {
   if (!game || game.pendingDecision || localRole === "spectator") return;
   if (game.rulePicker && canPickRule()) return;
   const gamePosition = gameCoordinate(x, y);
-  if (!canAct()) {
+  if (!canAct() || game.gameOver || game.rulePicker) {
     const clicked = game.getCell(gamePosition.x, gamePosition.y, viewBoard);
     if (!selected) {
       if (clicked) selected = gamePosition;
@@ -233,7 +231,7 @@ function handleTile(x, y) {
   }
   if (pendingTool?.kind === "buy") {
     if (viewBoard !== "Normal") { toast("Shop pieces must be placed on the Normal board."); return; }
-    sendAction({ action: "buy", id: pendingTool.id, x: gamePosition.x, y: gamePosition.y }); pendingTool = null; render(); return;
+    sendAction({ action: "buy", id: pendingTool.id, x: gamePosition.x, y: gamePosition.y, board: viewBoard }); pendingTool = null; render(); return;
   }
   if (pendingTool?.kind === "upgrade") {
     sendAction({ action: "upgrade", id: pendingTool.id, x: gamePosition.x, y: gamePosition.y, board: viewBoard }); pendingTool = null; render(); return;
@@ -277,7 +275,7 @@ function showWindow(templateId, build) {
   modalRoot.querySelector(".close-window").addEventListener("click", closeModal);
   build(modalRoot.querySelector(".window-card"));
 }
-function closeModal() { modalRoot.replaceChildren(); modalRoot.classList.add("hidden"); delete modalRoot.dataset.kind; }
+function closeModal() { modalRoot.replaceChildren(); modalRoot.classList.add("hidden"); delete modalRoot.dataset.kind; delete modalRoot.dataset.decisionId; }
 
 function showShop() {
   showWindow("#shop-template", card => {
@@ -332,6 +330,7 @@ function decisionChoices(decision) {
 function showDecision(decision) {
   modalRoot.replaceChildren(); modalRoot.classList.remove("hidden");
   modalRoot.dataset.kind = "decision";
+  modalRoot.dataset.decisionId = String(decision.id);
   const card = document.createElement("section"); card.className = "window-card decision-card";
   const icon = decision.type === "angel" ? "aggro-angel.png" : decision.type === "atheism" ? "atheism.png" : "devil.png";
   card.innerHTML = `<img src="${asset(icon)}" alt=""><h2>${decision.title}</h2><p>${decision.type === "angel" ? "Free him?" : decision.type === "atheism" ? "Choose a fate for the metaphysical boards." : "The Devil offers a bargain."}</p><div class="decision-actions"></div>`; modalRoot.append(card);
@@ -341,14 +340,19 @@ function showDecision(decision) {
 
 function renderModalState() {
   if (!game || localRole === "spectator") return;
-  if (game.rulePicker && modalRoot.classList.contains("hidden")) {
-    if (canPickRule()) return showRulePicker();
+  if (game.gameOver) {
+    if (["decision", "rule-picker", "draw"].includes(modalRoot.dataset.kind)) closeModal();
     return;
   }
+  if (modalRoot.dataset.kind === "decision" && (!game.pendingDecision || String(game.pendingDecision.id) !== modalRoot.dataset.decisionId)) closeModal();
+  if (modalRoot.dataset.kind === "rule-picker" && (!game.rulePicker || !canPickRule())) closeModal();
   if (game.pendingDecision) {
-    if (modalRoot.classList.contains("hidden")) {
-      if (!isOnline() || game.pendingDecision.color === playerColor()) showDecision(game.pendingDecision);
-    }
+    const ownsDecision = !isOnline() || game.pendingDecision.color === playerColor();
+    if (ownsDecision && modalRoot.dataset.kind !== "decision") showDecision(game.pendingDecision);
+    return;
+  }
+  if (game.rulePicker) {
+    if (canPickRule() && modalRoot.dataset.kind !== "rule-picker") return showRulePicker();
     return;
   }
   if (game.drawOffer && game.drawOffer !== playerColor() && modalRoot.classList.contains("hidden")) return showDrawOffer();

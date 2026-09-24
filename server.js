@@ -179,7 +179,7 @@ function handleAction(peer, message) {
   const coordinates = values => values.every(value => Number.isInteger(value) && value >= 0 && value < 8);
   switch (message.action) {
     case "move": accepted = coordinates([message.from?.x, message.from?.y, message.to?.x, message.to?.y]) && ["Normal", "Heaven", "Hell"].includes(message.board || "Normal") ? game.move(message.from, message.to, message.board || "Normal") : game.reject("Invalid board coordinates or board."); break;
-    case "buy": accepted = coordinates([message.x, message.y]) ? game.buy(String(message.id || ""), message.x, message.y) : game.reject("Invalid board coordinates."); break;
+    case "buy": accepted = coordinates([message.x, message.y]) && ["Normal", "Heaven", "Hell"].includes(message.board || "Normal") ? game.buy(String(message.id || ""), message.x, message.y, message.board || "Normal") : game.reject("Invalid board coordinates or board."); break;
     case "upgrade": accepted = coordinates([message.x, message.y]) && ["Normal", "Heaven", "Hell"].includes(message.board || "Normal") ? game.upgrade(String(message.id || ""), message.x, message.y, message.board || "Normal") : game.reject("Invalid board coordinates or board."); break;
     case "rule": accepted = game.rulePicker && game.availableRules.includes(message.rule) ? game.addRule(message.rule) : game.reject("No rule may be selected now."); break;
     case "decision": accepted = game.decision(message.choice); break;

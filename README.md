@@ -14,6 +14,9 @@ behavioral reference.
   and special-piece dialogs.
 - `public/assets` contains the original PNG resources copied from the Java
   repository without modification.
+- `test/game.test.js` and `test/server.test.js` cover rules, state integrity,
+  snapshots, and authoritative multiplayer actions.
+- `scripts/check-ui.js` checks the real frontend with two Chromium clients.
 
 The original game used a seed plus polling and deterministic local replay.
 The web version keeps the same seed-driven rule behavior but makes the server
@@ -25,7 +28,7 @@ room is retained.
 
 ## Start
 
-Node.js 20 or newer is required. No npm packages are required.
+Node.js 20 or newer is required. Running the game requires no npm packages.
 
 ```text
 npm start
@@ -46,6 +49,19 @@ Run the automated tests with:
 npm test
 ```
 
+For the browser checks, install the development dependencies and Chromium once:
+
+```text
+npm ci
+npx playwright install chromium
+npm run test:browser
+```
+
+The browser check starts its own server on an ephemeral port. It covers mirrored
+input and highlights, large sprites, purchases, cross-board upgrades and views,
+decisions, reconnect, terminal dialogs, and desktop/mobile layouts. Set
+`UI_SCREENSHOT_DIR` to an existing directory to also save desktop/mobile screenshots.
+
 ## Playing
 
 ### Single-player
@@ -59,9 +75,10 @@ no computer chess opponent in the original source.
 1. Player 1 chooses **Create online game**.
 2. Share the five-letter code shown in the Toolbox.
 3. Player 2 chooses **Join online game** and enters the code.
-4. Both clients receive the same authoritative state. Only the player whose
-   color is to move can submit a move, purchase, upgrade, board switch, or
-   rule choice. Either player can offer a draw or resign.
+4. Both clients receive the same authoritative state. Moves, purchases, and
+   upgrades belong to the player whose color is to move. Rule-picker ownership
+   alternates separately; special decisions belong to their designated player.
+   Either player can inspect any board, offer a draw, or resign.
 5. A refresh on the same room URL resumes the player when that browser still
    has its reconnect token. A third connection becomes a spectator.
 
@@ -90,9 +107,46 @@ Rule selection alternates between White and Black independently of the chess
 turn. Landmine and Pittrap rules select from currently empty squares so their
 three traps are placed reliably, and the game reports how many spawned.
 
-Destroying Hell resolves kings immediately: both opposing king colors in Hell
-produce a draw, while a single king color produces a win for the other side.
-Purchased Kings and Super Kings are included in this resolution.
+Victory counts every King and Super King across all surviving dimensions,
+including purchased Kings. A side loses when it has none remaining; losing both
+sides' final kings in the same resolution produces a draw. Destroying Heaven or
+Hell removes that dimension's pieces and evaluates the remaining global position.
+
+## Consistent gameplay resolution
+
+- Captures, replacements, portal arrivals, explosions, and resurrection resolve
+  completely before victory is checked. Pending NPC decisions are queued and
+  complete the initiating turn exactly once, including after reconnect.
+- Ordinary Normal deaths travel to Hell at the same coordinates. Suicide Bombers
+  and Jesters travel to Heaven and explode on their original board. Deaths in
+  Heaven/Hell are permanent; explicit portals can transfer living pieces again.
+- A Super King moves one square with its whole 2x2 footprint and has separate
+  two-square ranged attacks. Super Kings and Angels absorb the first attacker and
+  retain one life. The next hit resolves their normal death behavior. A defeated
+  Normal Super King enters Hell on its final life.
+- Heaven NPC arrivals consume the incoming piece while resolving the NPC's
+  interaction. A freed Angel becomes one Aggro Angel whose action is the Java
+  wind shift. Releasing an active NPC requires an empty 2x2 Normal footprint.
+- Portals preserve coordinates, forward through destination portals, and resolve
+  occupied destinations through the same death rules. A same-coordinate portal
+  chain spanning every active dimension collapses; other cycles lose the traveler.
+- Explosions affect the center and all eight neighboring squares. Chained blasts
+  propagate, with each unit hit once per chain and rewards applied once. Bombs
+  detonate when placed.
+- Necromancers resurrect behind their target. Controlled Zombies, Wild Horses,
+  and Wildlife retain their identity/sprite, use King movement, and stop hostile
+  automoving. Ownership, health, and counterpart state survive portals/snapshots.
+- Coins award 4 GP and Treasure awards 15 GP. Gold Rush spawns up to five distinct
+  empty Normal squares and reports the count. Treasure chooses an empty square
+  in its original middle-rank range.
+- Shop purchases consume a turn and are limited to Normal. Upgrades cost 5 GP
+  without consuming a turn and preserve piece state. Large upgrades require
+  their entire footprint to fit and be clear. Highlighting uses the same
+  eligibility checks as the authoritative engine.
+
+Large pieces retain all component identities during movement and transport.
+Black's large Super King uses the original full sprite because the Java assets
+contain no numbered Black Super King tiles.
 
 ## Porting notes
 
@@ -101,13 +155,16 @@ the game into standard chess. In particular, the Java code has no check,
 checkmate, stalemate, repetition, fifty-move, insufficient-material, clock,
 undo, or AI system. Multiplayer resignation and agreed draws are web transport
 features added because the browser version requires them. Kings can move into
-attack and can be captured;
-the source's win condition is the King/SuperKing death behavior.
+attack and can be captured. The web consistency update uses the global
+King/Super King survival condition described above.
 
 The Java enum includes `GUN`, `TREADMILL_BOARD`, `MEGA_CASTLE`, and `POTIONS`,
 but the Java implementation does not provide their gameplay behavior and does
 not offer most of them in the rule picker. They remain represented in the web
 rule catalog and Rules text, with the same no-op behavior where applicable.
+The Devil's "remove" and "smite" buttons likewise have no Java handlers. The Java
+source has a player Giraffe but no Wild Giraffe type or spawn mechanic; the port
+retains the Giraffe's original leaper movement.
 
 The Java client has no audio files or audio API usage, so there is no audio
 system to port. Its numbered PNGs are static per-piece tiles rather than an

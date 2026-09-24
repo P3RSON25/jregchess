@@ -129,6 +129,59 @@ function openClient() {
   });
 }
 
+test("rule ownership alternates independently of turns and cannot be bypassed by purchases", async t => {
+  if (typeof WebSocket === "undefined") return t.skip("This Node runtime has no built-in WebSocket client");
+  const white = await openClient(), black = await openClient();
+  t.after(() => { white.close(); black.close(); });
+  const whiteMessages = queueMessages(white), blackMessages = queueMessages(black);
+  white.send(JSON.stringify({ type: "create" }));
+  const created = await whiteMessages.next(message => message.type === "joined");
+  await whiteMessages.next(message => message.type === "state");
+  black.send(JSON.stringify({ type: "join", room: created.room }));
+  await blackMessages.next(message => message.type === "joined");
+  await blackMessages.next(message => message.type === "state");
+  await whiteMessages.next(message => message.type === "state" && message.connected.black);
+
+  const move = async (client, messages, from, to) => {
+    client.send(JSON.stringify({ type: "action", action: "move", from, to, board: "Normal" }));
+    return messages.next(message => message.type === "state" &&
+      message.state.history.at(-1)?.type === "move" &&
+      message.state.history.at(-1).from.x === from.x && message.state.history.at(-1).from.y === from.y &&
+      message.state.history.at(-1).to.x === to.x && message.state.history.at(-1).to.y === to.y);
+  };
+  await move(white, whiteMessages, { x: 0, y: 6 }, { x: 0, y: 5 });
+  await move(black, blackMessages, { x: 0, y: 1 }, { x: 0, y: 2 });
+  await move(white, whiteMessages, { x: 1, y: 6 }, { x: 1, y: 5 });
+  await move(black, blackMessages, { x: 1, y: 1 }, { x: 1, y: 2 });
+  await whiteMessages.next(message => message.type === "state" && message.state.rulePicker);
+  black.send(JSON.stringify({ type: "action", action: "rule", rule: "MORE_GOLD" }));
+  assert.match((await blackMessages.next(message => message.type === "error")).message, /rule choice/i);
+  white.send(JSON.stringify({ type: "action", action: "buy", id: "pawn", x: 3, y: 3 }));
+  assert.match((await whiteMessages.next(message => message.type === "error")).message, /choice/i);
+  white.send(JSON.stringify({ type: "action", action: "upgrade", id: "unicorn", x: 1, y: 7 }));
+  assert.match((await whiteMessages.next(message => message.type === "error")).message, /choice/i);
+  white.send(JSON.stringify({ type: "action", action: "rule", rule: "PAWNS_MOVE_FOUR" }));
+  await whiteMessages.next(message => message.type === "state" && message.state.rules.includes("PAWNS_MOVE_FOUR"));
+
+  for (let i = 0; i < 3; i++) {
+    const forward = i % 2 === 0;
+    await move(white, whiteMessages, forward ? { x: 1, y: 7 } : { x: 2, y: 5 }, forward ? { x: 2, y: 5 } : { x: 1, y: 7 });
+    await move(black, blackMessages, forward ? { x: 1, y: 0 } : { x: 2, y: 2 }, forward ? { x: 2, y: 2 } : { x: 1, y: 0 });
+  }
+  const picker = await whiteMessages.next(message => message.type === "state" && message.state.rulePickerColor === "Black");
+  assert.equal(picker.state.whiteToMove, true);
+  white.send(JSON.stringify({ type: "action", action: "rule", rule: "MORE_GOLD" }));
+  assert.match((await whiteMessages.next(message => message.type === "error")).message, /rule choice/i);
+  black.send(JSON.stringify({ type: "action", action: "rule", rule: "MORE_GOLD" }));
+  const selected = await whiteMessages.next(message => message.type === "state" && message.state.history.at(-1)?.rule === "MORE_GOLD");
+  assert.equal(selected.state.whiteToMove, true);
+  assert.equal(selected.state.rulePicker, false);
+  assert.equal(selected.state.whiteGP, 15);
+  assert.equal(selected.state.blackGP, 15);
+  white.send(JSON.stringify({ type: "action", action: "buy", id: "pawn", x: 3, y: 3, board: "Hell" }));
+  assert.match((await whiteMessages.next(message => message.type === "error")).message, /material board/i);
+});
+
 function queueMessages(socket) {
   const messages = []; const waiters = [];
   socket.addEventListener("message", event => {
