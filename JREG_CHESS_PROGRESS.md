@@ -9,7 +9,7 @@ checklist is covered by engine, server, and real-browser checks.
 
 Latest verification:
 
-- `npm test`: **73 tests passing**.
+- `npm test`: **82 tests passing**.
 - `npm run test:browser`: passed with two real Chromium clients.
 - Node syntax checks and `git diff --check`: passed.
 - Desktop and 390px mobile Black-perspective screenshots inspected.
@@ -91,6 +91,11 @@ development dependency for the repeatable browser check.
 - Necromancer resurrection preserves Zombie/Wild Horse/Wildlife identity while
   assigning player control and King movement. Hostile automoving stops.
 - Control persists through Normal → Hell → Heaven → Normal travel and snapshots.
+- Autonomous NPC interactions now resolve with no player beneficiary: their
+  spawns, captures, replacements, and indirect portal/death/explosion effects
+  award no GP and queue no Heaven NPC decisions for either side. Player-controlled
+  wildlife retains its player's rewards and choices. Regression coverage checks
+  both turns, all entry paths, and restoration of player attribution afterward.
 - The Java source has no Wild Giraffe class, asset, or spawn behavior. Unsupported
   partial Wild Giraffe references were removed; ordinary Giraffe remains a leaper.
 

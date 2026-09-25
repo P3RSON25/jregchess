@@ -225,12 +225,19 @@ export class GameState {
 
   // A whole move (including deaths, arrivals and chained blasts) is one transaction.
   // Victory is evaluated only after the last in-flight piece has been resolved.
-  resolve(operation) {
+  resolve(operation, actor = null) {
     this.beginResolution();
-    try { return operation(); } finally { this.endResolution(); }
+    const beneficiary = this._resolution.beneficiary;
+    // Autonomous NPC actions have no player recipient, including indirect
+    // deaths, portal arrivals and explosions caused by that action.
+    if (this.isNpcPiece(actor) && AUTOMOVING_TYPES.has(actor.type)) this._resolution.beneficiary = null;
+    try { return operation(); } finally {
+      this._resolution.beneficiary = beneficiary;
+      this.endResolution();
+    }
   }
   beginResolution() {
-    if (this._resolutionDepth === 0) this._resolution = { removed: new Set(), deaths: new Set() };
+    if (this._resolutionDepth === 0) this._resolution = { removed: new Set(), deaths: new Set(), beneficiary: this.currentColor() };
     this._resolutionDepth++;
   }
   endResolution() {
@@ -444,7 +451,7 @@ export class GameState {
       const choicesBefore = this.decisionCount();
       const result = this.resolveArrival(this.leader(piece), x, y, boardName, visited);
       return result !== true && this.decisionCount() > choicesBefore ? "decision" : result;
-    });
+    }, piece);
   }
 
   resolveArrival(root, x, y, boardName, visited = new Set()) {
@@ -609,8 +616,9 @@ export class GameState {
   }
 
   currentColor() { return this.whiteToMove ? COLORS.WHITE : COLORS.BLACK; }
+  interactionColor() { return this._resolution ? this._resolution.beneficiary : this.currentColor(); }
   funds() { return this.whiteToMove ? this.whiteGP : this.blackGP; }
-  giveGold(amount, color = this.currentColor()) { if (color === COLORS.WHITE) this.whiteGP += amount; else if (color === COLORS.BLACK) this.blackGP += amount; }
+  giveGold(amount, color = this.interactionColor()) { if (color === COLORS.WHITE) this.whiteGP += amount; else if (color === COLORS.BLACK) this.blackGP += amount; }
   withdraw(amount) { this.giveGold(-amount); }
   emit(message, icon = null) { this.lastEvent = { id: ++this.eventId, message, icon }; }
 
@@ -749,7 +757,7 @@ export class GameState {
       const choicesBefore = this.decisionCount();
       const result = this.resolveCapture(this.leader(this.getCell(x, y, boardName)), this.leader(taker));
       return !result && this.decisionCount() > choicesBefore ? "decision" : result;
-    });
+    }, taker);
   }
 
   resolveCapture(target, attacker, { visited = new Set() } = {}) {
@@ -863,7 +871,7 @@ export class GameState {
       if (destination) this.resolveArrival(taker, portal.x, portal.y, destination, visited);
       else this.removePiece(taker);
       return false;
-    });
+    }, taker);
   }
 
   explode(x, y, taker, boardName = this.currentBoard, extraTargets = []) {
@@ -965,11 +973,13 @@ export class GameState {
   decisionCount() { return (this.pendingDecision ? 1 : 0) + this._decisionQueue.length; }
 
   queueDecision(type, target) {
+    const color = this.interactionColor();
+    if (color !== COLORS.WHITE && color !== COLORS.BLACK) return;
     const existing = [this.pendingDecision, ...this._decisionQueue].filter(Boolean);
     if (existing.some(choice => choice.type === type && choice.targetUid === target.uid)) return;
     const titles = { angel: "Free him?", atheism: "God Of Atheism", devil: "The Devil" };
     const decision = {
-      id: this._nextDecisionId++, type, title: titles[type], color: this.currentColor(),
+      id: this._nextDecisionId++, type, title: titles[type], color,
       targetUid: target.uid, angelUid: type === "angel" ? target.uid : undefined
     };
     if (this.pendingDecision) this._decisionQueue.push(decision);
@@ -1152,7 +1162,7 @@ export class GameState {
   automove(piece) {
     const current = piece && this.findByUid(piece.uid);
     if (!current || current.controlledBy || current.board !== "Normal" || this.gameOver || this.pendingDecision) return;
-    return this.resolve(() => this.resolveAutomove(current));
+    return this.resolve(() => this.resolveAutomove(current), current);
   }
 
   resolveAutomove(current) {

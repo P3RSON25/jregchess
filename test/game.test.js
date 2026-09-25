@@ -722,7 +722,7 @@ test("indirect Heaven decisions are queued, serialized and complete one turn in 
   assert.deepEqual(JSON.parse(JSON.stringify(copy.toSnapshot())), JSON.parse(JSON.stringify(game.toSnapshot())));
 });
 
-test("an NPC's portal decision resumes the remaining automovers without advancing the turn again", () => {
+test("an NPC's Heaven interaction skips player choices and continues the remaining automovers", () => {
   const game = protectedFixture("automove-choice");
   game.placeNew("Portal", COLORS.NPC, 3, 4, "Normal");
   game.placeNew("Angel", COLORS.NPC, 3, 4, "Heaven");
@@ -733,11 +733,10 @@ test("an NPC's portal decision resumes the remaining automovers without advancin
   game.random.inclusive = () => 1;
   startFixture(game);
   game.nextTurn();
-  assert.equal(game.pendingDecision.type, "angel");
-  assert.equal(game.pendingDecision.color, COLORS.BLACK);
-  assert.equal(game.whiteToMove, false);
-  assert.strictEqual(game.getCell(0, 5, "Normal"), zombie);
-  assert.equal(game.decision("no"), true);
+  assert.equal(game.pendingDecision, null);
+  assert.deepEqual(game.toSnapshot().decisionQueue, []);
+  assert.equal(game.getCell(3, 4, "Heaven").health, 1);
+  assert.deepEqual([game.whiteGP, game.blackGP], [5, 5]);
   assert.equal(game.whiteToMove, false);
   assert.equal(game.turnsSinceNewRule, 1);
   assert.strictEqual(game.getCell(1, 5, "Normal"), zombie);
@@ -1119,5 +1118,142 @@ test("freeing the Angel during a move runs its Java wind effect once without mov
   assert.equal(game.gameOver, false);
   assert.equal(game.whiteToMove, false);
   assert.equal(game.turnsSinceNewRule, 1);
+  assertIntegrity(game);
+});
+
+for (const type of ["Zombie", "WildHorse", "Wildlife"]) {
+  test(`${type} replacements consume collectibles and transfer victims without awarding anyone GP`, () => {
+    for (const victimType of ["Coin", "Treasure", "Rook"]) {
+      const game = protectedFixture(`neutral-replacement-${type}-${victimType}`);
+      const victim = game.placeNew(victimType, victimType === "Rook" ? COLORS.BLACK : COLORS.NPC, 3, 3, "Normal");
+      game.whiteToMove = victimType !== "Treasure";
+      startFixture(game);
+      const wild = game.placeNew(type, COLORS.NPC, 3, 3, "Normal");
+      assert.strictEqual(game.getCell(3, 3, "Normal"), wild);
+      if (victimType === "Rook") assert.strictEqual(game.getCell(3, 3, "Hell"), victim);
+      else assert.equal(game.findByUid(victim.uid), null);
+      assert.deepEqual([game.whiteGP, game.blackGP], [5, 5]);
+      assert.equal(game.pendingDecision, null);
+      assertIntegrity(game);
+    }
+  });
+}
+
+test("autonomous captures and afterlife coin replacements award neither side GP on either turn", () => {
+  for (const type of ["Zombie", "WildHorse", "Meteor"]) for (const whiteToMove of [true, false]) {
+    const game = protectedFixture(`neutral-automove-${type}-${whiteToMove}`);
+    const [x, y] = type === "Zombie" ? [2, 3] : type === "WildHorse" ? [1, 2] : [2, 2];
+    const mover = game.placeNew(type, COLORS.NPC, x, y, "Normal", { movingRight: true });
+    const victim = game.placeNew("Rook", COLORS.BLACK, 3, 3, "Normal");
+    const coin = game.placeNew("Coin", COLORS.NPC, 3, 3, "Hell");
+    game.registerAutomover(mover);
+    game.random.inclusive = () => 1;
+    game.whiteToMove = whiteToMove;
+    startFixture(game);
+    game.nextTurn();
+    assert.equal(game.findByUid(coin.uid), null);
+    assert.strictEqual(game.getCell(3, 3, "Hell"), victim);
+    assert.deepEqual([game.whiteGP, game.blackGP], [5, 5]);
+    assert.equal(game.whiteToMove, !whiteToMove);
+    assert.equal(game.turnsSinceNewRule, 1);
+    assertIntegrity(game);
+  }
+});
+
+test("uncontrolled portal travelers grant no GP or Heaven choices through any entry point", () => {
+  for (const entry of ["transport", "capture", "portal"]) for (const targetType of ["Coin", "Treasure", "Angel", "Atheism", "Devil", "Church"]) {
+    const game = protectedFixture(`neutral-heaven-${entry}-${targetType}`);
+    const target = game.placeNew(targetType, COLORS.NPC, 3, 3, "Heaven");
+    const portal = game.placeNew("Portal", COLORS.NPC, 3, 3, "Normal", { portalTo: "Hell" });
+    game.placeNew("Portal", COLORS.NPC, 3, 3, "Hell", { portalTo: "Heaven" });
+    const traveler = game.placeNew("WildHorse", COLORS.NPC, 1, 2, "Normal");
+    startFixture(game);
+    if (entry === "transport") game.transportPiece(traveler, 3, 3, "Normal");
+    else if (entry === "capture") game.takeAt(3, 3, traveler, "Normal");
+    else game.portalKill(portal, traveler, "Normal");
+    assert.equal(game.findByUid(traveler.uid), null);
+    if (targetType === "Angel") assert.equal(target.health, 1);
+    assert.deepEqual([game.whiteGP, game.blackGP], [5, 5]);
+    assert.equal(game.pendingDecision, null);
+    assert.deepEqual(game.toSnapshot().decisionQueue, []);
+    assert.ok(game.board("Heaven") && game.board("Hell"));
+    assertIntegrity(game);
+  }
+});
+
+test("NPC-caused player death transfers inherit no recipient and later player actions recover ownership", () => {
+  const game = protectedFixture("neutral-indirect-arrival");
+  const victim = game.placeNew("Rook", COLORS.WHITE, 3, 3, "Normal");
+  game.placeNew("Portal", COLORS.NPC, 3, 3, "Hell", { portalTo: "Heaven" });
+  const atheism = game.placeNew("Atheism", COLORS.NPC, 3, 3, "Heaven");
+  const horse = game.placeNew("WildHorse", COLORS.NPC, 1, 2, "Normal");
+  game.random.inclusive = () => 1;
+  startFixture(game);
+  game.automove(horse);
+  assert.strictEqual(game.getCell(3, 3, "Normal"), horse);
+  assert.equal(game.findByUid(victim.uid), null);
+  assert.strictEqual(game.getCell(3, 3, "Heaven"), atheism);
+  assert.equal(game.pendingDecision, null);
+  assert.deepEqual([game.whiteGP, game.blackGP], [5, 5]);
+
+  game.placeNew("Pawn", COLORS.WHITE, 6, 6, "Normal");
+  game.placeNew("Coin", COLORS.NPC, 5, 5, "Normal");
+  assert.equal(game.move({ x: 6, y: 6 }, { x: 5, y: 5 }, "Normal"), true);
+  assert.deepEqual([game.whiteGP, game.blackGP], [9, 5]);
+  assertIntegrity(game);
+});
+
+test("an explosion triggered by a zombie awards no GP for collateral pieces or collectibles", () => {
+  const game = protectedFixture("neutral-blast");
+  const zombie = game.placeNew("Zombie", COLORS.NPC, 2, 3, "Normal", { movingRight: true });
+  game.placeNew("SuicideBomber", COLORS.BLACK, 3, 3, "Normal");
+  const rook = game.placeNew("Rook", COLORS.BLACK, 4, 4, "Normal");
+  const coin = game.placeNew("Coin", COLORS.NPC, 3, 2, "Normal");
+  const treasure = game.placeNew("Treasure", COLORS.NPC, 4, 2, "Normal");
+  startFixture(game);
+  game.automove(zombie);
+  assert.equal(game.findByUid(zombie.uid), null);
+  assert.equal(game.findByUid(coin.uid), null);
+  assert.equal(game.findByUid(treasure.uid), null);
+  assert.strictEqual(game.getCell(4, 4, "Hell"), rook);
+  assert.deepEqual([game.whiteGP, game.blackGP], [5, 5]);
+  assertIntegrity(game);
+});
+
+test("controlled wild pieces still receive their player's GP and Heaven decisions", () => {
+  for (const type of ["Zombie", "WildHorse", "Wildlife"]) for (const color of [COLORS.WHITE, COLORS.BLACK]) {
+    const game = protectedFixture(`owned-interaction-${type}-${color}`);
+    game.placeNew(type, color, 2, 3, "Normal", { controlledBy: color });
+    game.placeNew("Coin", COLORS.NPC, 3, 3, "Normal");
+    game.placeNew("Portal", COLORS.NPC, 4, 3, "Normal");
+    game.placeNew("Atheism", COLORS.NPC, 4, 3, "Heaven");
+    game.whiteToMove = color === COLORS.WHITE;
+    startFixture(game);
+    assert.equal(game.move({ x: 2, y: 3 }, { x: 3, y: 3 }, "Normal"), true);
+    assert.deepEqual([game.whiteGP, game.blackGP], color === COLORS.WHITE ? [9, 5] : [5, 9]);
+    game.whiteToMove = color === COLORS.WHITE;
+    assert.equal(game.move({ x: 3, y: 3 }, { x: 4, y: 3 }, "Normal"), true);
+    assert.equal(game.pendingDecision.type, "atheism");
+    assert.equal(game.pendingDecision.color, color);
+    assert.equal(game.decision("metaphysical"), true);
+    assertIntegrity(game);
+  }
+});
+
+test("wildlife rule spawns do not pay either player for replacements or nested afterlife coins", () => {
+  const game = protectedFixture("neutral-rule-spawn");
+  const coin = game.placeNew("Coin", COLORS.NPC, 0, 3, "Normal");
+  const rook = game.placeNew("Rook", COLORS.BLACK, 7, 4, "Normal");
+  const afterlifeCoin = game.placeNew("Coin", COLORS.NPC, 7, 4, "Hell");
+  startFixture(game);
+  assert.equal(game.addRule("WILD_LIFE"), true);
+  assert.equal(game.getCell(0, 3, "Normal").type, "Wildlife");
+  assert.equal(game.getCell(7, 4, "Normal").type, "Wildlife");
+  assert.strictEqual(game.getCell(7, 4, "Hell"), rook);
+  assert.equal(game.findByUid(coin.uid), null);
+  assert.equal(game.findByUid(afterlifeCoin.uid), null);
+  assert.deepEqual([game.whiteGP, game.blackGP], [5, 5]);
+  assert.equal(game.addRule("MORE_GOLD"), true);
+  assert.deepEqual([game.whiteGP, game.blackGP], [15, 15]);
   assertIntegrity(game);
 });

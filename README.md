@@ -136,6 +136,10 @@ Hell removes that dimension's pieces and evaluates the remaining global position
 - Necromancers resurrect behind their target. Controlled Zombies, Wild Horses,
   and Wildlife retain their identity/sprite, use King movement, and stop hostile
   automoving. Ownership, health, and counterpart state survive portals/snapshots.
+- Uncontrolled zombies and autonomous wild/NPC pieces have no reward or choice
+  recipient. Their replacements, captures, portal arrivals, and resulting death
+  or explosion chains award neither player GP and generate no player Heaven NPC
+  choices. Player-controlled pieces receive their normal rewards and decisions.
 - Coins award 4 GP and Treasure awards 15 GP. Gold Rush spawns up to five distinct
   empty Normal squares and reports the count. Treasure chooses an empty square
   in its original middle-rank range.
