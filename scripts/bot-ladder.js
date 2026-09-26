@@ -11,7 +11,8 @@
 import { GameState } from "../shared/game.js";
 import { planBotTurn, evaluate, setExposureEnabled } from "../shared/bot.js";
 import { loadPolicyNet, setPolicyColors } from "../shared/policyNet.js";
-import { readFileSync } from "node:fs";
+import { loadValueNet } from "../shared/valueNet.js";
+import { readFileSync, existsSync } from "node:fs";
 
 const args = Object.fromEntries(
   process.argv.slice(2).reduce((acc, cur, i, arr) => {
@@ -40,6 +41,7 @@ if (args.policy) {
   setPolicyColors(sides.length ? sides : []);
 }
 if (flag("noExposure")) setExposureEnabled(false);
+if (args.value && existsSync(args.value)) loadValueNet(JSON.parse(readFileSync(args.value, "utf8")));
 
 function sideCfg(prefix, fallbackDiff) {
   return {

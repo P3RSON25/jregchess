@@ -8,7 +8,7 @@
 // (automover sampling uses the cloned RNG, same as real game).
 import { GameState, SHOP_ITEMS, UPGRADES, RULE_PICKER, COLORS } from "./game.js";
 import { pieceTypeOf, PIECE_VALUES, GP_VALUE, KING_COUNT_BONUS } from "./values.js";
-import { nnBonus } from "./valueNet.js";
+import { nnBonus, valueNetLoaded } from "./valueNet.js";
 import { policyLogits, policyBonusFor, policyNetLoaded, policyAppliesTo } from "./policyNet.js";
 import {
   armedTargets, findAtheisms, portalBuyValue, forcedAtheismChoice,
@@ -920,8 +920,36 @@ export function chooseMainAction(game, difficulty = "normal", opts = {}) {
     }
   }
   const snap = game.toSnapshot();
+  // Learned value as OPT-IN root prior only (opts.valueRoot): per-leaf NN
+  // forwards can never fit a browser budget, and measured evidence shows
+  // NN-first ordering collapses alpha-beta cutoffs (p50 377ms vs ~165ms,
+  // 11/26 turns over the 450ms budget). Default OFF: the shipped strength
+  // config is policy+static ordering. Bench-only until a cheaper use exists.
+  const NN_PRESHORT = 40;
+  let nnRoot = null;
+  if (opts.valueRoot && valueNetLoaded()) {
+    const pre = rootActions
+      .map(a => ({ a, s: staticScoreForOrdering(game, a, color, invCtx) }))
+      .sort((x, y) => y.s - x.s)
+      .slice(0, NN_PRESHORT)
+      .map(e => e.a);
+    nnRoot = new Map();
+    for (const a of pre) {
+      const { sim, ok } = cloneApply(snap, a);
+      if (!ok) continue;
+      try { nnRoot.set(a, nnBonus(sim, color) * 0.6); } catch { /* ignore */ }
+    }
+  }
+  // Gumbel temperature sampling for farm diversity (opts.gumbel in cp):
+  // argmax with temp 0 (default, deterministic play), top-k exploration
+  // otherwise. Used by selfplay opening jitter; never in rated UI play.
+  const temp = opts.gumbel || 0;
   const ordered = rootActions
-    .map(a => ({ a, s: staticScoreForOrdering(game, a, color, invCtx) + policyBonusFor(logits, a) }))
+    .map(a => {
+      let s = staticScoreForOrdering(game, a, color, invCtx) + policyBonusFor(logits, a) + (nnRoot?.get(a) || 0);
+      if (temp > 0) s += -Math.log(-Math.log(Math.random())) * temp;
+      return { a, s };
+    })
     .sort((x, y) => y.s - x.s)
     .slice(0, 26)
     .map(e => e.a);

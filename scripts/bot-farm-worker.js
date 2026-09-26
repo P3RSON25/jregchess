@@ -3,11 +3,14 @@
 import { parentPort, workerData } from "node:worker_threads";
 import { readFileSync, existsSync } from "node:fs";
 import { GameState } from "../shared/game.js";
-import { planBotTurn } from "../shared/bot.js";
+import { planBotTurn, evaluate } from "../shared/bot.js";
 import { encodePosition } from "../shared/features.js";
 import { loadPolicyNet, setPolicyColors } from "../shared/policyNet.js";
 
-const { start, count, white, black, every, maxPlies, seedTag, policy } = workerData;
+const { start, count, white, black, every, maxPlies, seedTag, policy, adjudicate, jitterTemp, jitterPlies } = workerData;
+const ADJ_CP = Number(adjudicate || 0);
+const JIT_TEMP = Number(jitterTemp || 0);
+const JIT_PLIES = Number(jitterPlies || 0);
 
 // New-strength data: both sides use the shipped policy when requested.
 // Value net stays unloaded (per-eval forwards are too slow for selfplay).
@@ -49,14 +52,27 @@ for (let i = 0; i < count; i++) {
       : game.rulePicker
         ? (game.rulePickerColor === "White" ? white : black)
         : (game.whiteToMove ? white : black);
-    const plan = planBotTurn(game, diff);
+    // Opening jitter: Gumbel-sampled root ordering for diverse lines.
+    const plan = (JIT_TEMP > 0 && plies < JIT_PLIES && diff === "hard")
+      ? planBotTurn(game, diff, { gumbel: JIT_TEMP })
+      : planBotTurn(game, diff);
     if (!plan) break;
     if (plies % every === 0) buf.push(encodePosition(game, plan.action));
     if (!applyPlan(game, plan)) break;
     plies++;
   }
-  const result_w = !game.gameOver ? 0 : game.draw ? 0 : game.winner === "White" ? 1 : -1;
-  for (const p of buf) lines.push(JSON.stringify({ ...p, result_w, seed: g, timeout: !game.gameOver, pol: policyTag }));
+  // Adjudicated labels: unfinished games inherit the eval verdict instead of
+  // a noise 0 (timeout draws taught v1 that everything is equal).
+  let result_w = !game.gameOver ? 0 : game.draw ? 0 : game.winner === "White" ? 1 : -1;
+  let adj = false;
+  if (!game.gameOver && ADJ_CP > 0) {
+    const ev = evaluate(game, "White");
+    if (ev > ADJ_CP) result_w = 1;
+    else if (ev < -ADJ_CP) result_w = -1;
+    else result_w = 0;
+    adj = true;
+  }
+  for (const p of buf) lines.push(JSON.stringify({ ...p, result_w, seed: g, timeout: !game.gameOver, pol: policyTag, adj }));
   positions += buf.length;
   parentPort.postMessage({ type: "progress", done: i + 1, positions });
 }
