@@ -591,6 +591,12 @@ function isKingCapture(game, action) {
 let SEARCH_DEADLINE = 0;
 let SEARCH_NODES = 0;
 let SEARCH_TIMEOUT = false;
+let SEARCH_WIDTHS = null; // null = default {depth>=2: 22, else: all}
+function widthFor(depth, full) {
+  if (!SEARCH_WIDTHS) return depth >= 2 ? 22 : full;
+  if (Object.prototype.hasOwnProperty.call(SEARCH_WIDTHS, depth)) return Math.min(SEARCH_WIDTHS[depth], full);
+  return depth >= 2 ? 22 : full;
+}
 export function searchStats() { return { nodes: SEARCH_NODES, timeout: SEARCH_TIMEOUT }; }
 function tickNode() {
   SEARCH_NODES++;
@@ -683,11 +689,13 @@ function search(game, depth, alpha, beta, perspective, isRoot = false, qdepth = 
   }
   let actions = [...enumerateMoves(node, 220), ...enumerateBuys(node, 24)];
   if (!actions.length) return evaluate(node, perspective);
-  // Order + prune to keep branching sane.
+  // Order + prune to keep branching sane. Depth-3+ callers pass narrow
+  // widths via opts; default preserves shipped depth-2 behavior exactly.
+  const width = widthFor(depth, actions.length);
   actions = actions
     .map(a => ({ a, s: staticScoreForOrdering(node, a, perspective) }))
     .sort((x, y) => y.s - x.s)
-    .slice(0, depth >= 2 ? 22 : actions.length)
+    .slice(0, width)
     .map(e => e.a);
 
   const snap = node.toSnapshot();
@@ -764,6 +772,7 @@ export function chooseMainAction(game, difficulty = "normal", opts = {}) {
   clearTT();
   SEARCH_NODES = 0; SEARCH_TIMEOUT = false;
   SEARCH_DEADLINE = Date.now() + timeBudget;
+  SEARCH_WIDTHS = opts.widths || null;
   let logits = null;
   if (policyNetLoaded() && policyAppliesTo(color)) {
     try { logits = policyLogits(game); } catch { logits = null; }
@@ -798,6 +807,7 @@ export function chooseMainAction(game, difficulty = "normal", opts = {}) {
     const d3 = searchDepth(2, 12);
     if (!SEARCH_TIMEOUT && d3.best) best = d3.best;
   }
+  SEARCH_WIDTHS = null;
   return best;
 }
 

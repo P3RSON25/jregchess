@@ -9,7 +9,8 @@
     "test:browser": "node scripts/check-ui.js",
     "bot:bench": "node scripts/bot-bench.js",
     "bot:selfplay": "node scripts/bot-selfplay.js",
-    "bot:farm": "node scripts/bot-farm.js"
+    "bot:farm": "node scripts/bot-farm.js",
+    "bot:ladder": "node scripts/bot-ladder.js"
   },
   "engines": {
     "node": ">=20"
