@@ -8,6 +8,7 @@
 // (automover sampling uses the cloned RNG, same as real game).
 import { GameState, SHOP_ITEMS, UPGRADES, RULE_PICKER, COLORS } from "./game.js";
 import { nnBonus } from "./valueNet.js";
+import { policyLogits, policyBonusFor, policyNetLoaded, policyAppliesTo } from "./policyNet.js";
 
 export const BOT_DIFFICULTIES = ["easy", "normal", "hard"];
 
@@ -757,15 +758,19 @@ export function chooseMainAction(game, difficulty = "normal", opts = {}) {
     }
     return best || all[0];
   }
-  // hard: iterative-deepening depth-1 then depth-2 alpha-beta, time-capped.
-  // Depth 1 always completes (fast); depth 2 refines if budget remains.
-  // On timeout the depth-1 best is returned, so the tab never freezes.
+  // hard: iterative-deepening alpha-beta, time-capped. One policy forward per
+  // turn (when weights loaded) orders the root; deeper levels reuse static
+  // ordering. Depth 3 runs only with opts.depth3 (bench) — browser stays at 2.
   clearTT();
   SEARCH_NODES = 0; SEARCH_TIMEOUT = false;
   SEARCH_DEADLINE = Date.now() + timeBudget;
+  let logits = null;
+  if (policyNetLoaded() && policyAppliesTo(color)) {
+    try { logits = policyLogits(game); } catch { logits = null; }
+  }
   const snap = game.toSnapshot();
   const ordered = all
-    .map(a => ({ a, s: staticScoreForOrdering(game, a, color) }))
+    .map(a => ({ a, s: staticScoreForOrdering(game, a, color) + policyBonusFor(logits, a) }))
     .sort((x, y) => y.s - x.s)
     .slice(0, 26)
     .map(e => e.a);
@@ -788,6 +793,10 @@ export function chooseMainAction(game, difficulty = "normal", opts = {}) {
   if (!SEARCH_TIMEOUT && Date.now() < SEARCH_DEADLINE) {
     const d2 = searchDepth(1, 22);
     if (!SEARCH_TIMEOUT && d2.best) best = d2.best;
+  }
+  if (opts.depth3 && !SEARCH_TIMEOUT && Date.now() < SEARCH_DEADLINE) {
+    const d3 = searchDepth(2, 12);
+    if (!SEARCH_TIMEOUT && d3.best) best = d3.best;
   }
   return best;
 }

@@ -3,6 +3,7 @@ import {
 } from "/shared/game.js";
 import { planBotTurn } from "/shared/bot.js";
 import { loadValueNet, valueNetLoaded } from "/shared/valueNet.js";
+import { loadPolicyNet, policyNetLoaded } from "/shared/policyNet.js";
 
 let nnStatus = "handcrafted eval";
 // Learned eval is optional: ml/value_v1.json is served at /ml/*.json when
@@ -11,6 +12,10 @@ fetch("/ml/value_v1.json", { cache: "no-store" })
   .then(response => { if (!response.ok) throw new Error("no weights"); return response.json(); })
   .then(json => { loadValueNet(json); nnStatus = "neural eval"; renderStatus(); })
   .catch(() => { nnStatus = "handcrafted eval"; });
+fetch("/ml/policy_v1.json", { cache: "no-store" })
+  .then(response => { if (!response.ok) throw new Error("no policy"); return response.json(); })
+  .then(json => { loadPolicyNet(json); renderStatus(); })
+  .catch(() => {});
 
 const $ = selector => document.querySelector(selector);
 const menu = $("#menu");
@@ -347,7 +352,7 @@ function cycleViewBoard() {
 
 function renderStatus() {
   const status = $("#connection-status");
-  if (botGame) status.textContent = `Bot game (${botDifficulty}${valueNetLoaded() ? " + NN" : ""})`;
+  if (botGame) status.textContent = `Bot game (${botDifficulty}${valueNetLoaded() ? " + NN" : ""}${policyNetLoaded() ? " + P" : ""})`;
   else if (!isOnline()) status.textContent = `Local hot-seat · ${nnStatus}`;
   else if (!connected) status.textContent = "Disconnected";
   else status.textContent = localRole === "spectator" ? "Spectating" : `Player ${localRole}`;
