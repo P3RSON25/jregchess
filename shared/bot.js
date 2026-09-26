@@ -768,7 +768,9 @@ export function chooseMainAction(game, difficulty = "normal", opts = {}) {
   }
   // hard: iterative-deepening alpha-beta, time-capped. One policy forward per
   // turn (when weights loaded) orders the root; deeper levels reuse static
-  // ordering. Depth 3 runs only with opts.depth3 (bench) — browser stays at 2.
+  // ordering. Depth 3 runs whenever there is budget left and ordering is
+  // trustworthy (policy loaded) or explicitly forced (bench opts.depth3) —
+  // the deadline still guarantees the browser never freezes.
   clearTT();
   SEARCH_NODES = 0; SEARCH_TIMEOUT = false;
   SEARCH_DEADLINE = Date.now() + timeBudget;
@@ -803,7 +805,9 @@ export function chooseMainAction(game, difficulty = "normal", opts = {}) {
     const d2 = searchDepth(1, 22);
     if (!SEARCH_TIMEOUT && d2.best) best = d2.best;
   }
-  if (opts.depth3 && !SEARCH_TIMEOUT && Date.now() < SEARCH_DEADLINE) {
+  const wantD3 = opts.depth3 || (logits && !opts.widths);
+  if (wantD3 && !SEARCH_TIMEOUT && Date.now() < SEARCH_DEADLINE) {
+    if (!opts.widths) SEARCH_WIDTHS = { 1: 14, 2: 10 };
     const d3 = searchDepth(2, 12);
     if (!SEARCH_TIMEOUT && d3.best) best = d3.best;
   }
