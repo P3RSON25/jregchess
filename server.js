@@ -25,8 +25,10 @@ function serveStatic(request, response) {
   }
   let requestPath = url.pathname === "/" ? "index.html" : decodeURIComponent(url.pathname.slice(1));
   const isShared = requestPath.startsWith("shared/");
-  const base = isShared ? join(ROOT, "shared") : PUBLIC;
+  const isModel = requestPath.startsWith("ml/") && requestPath.endsWith(".json");
+  const base = isShared ? join(ROOT, "shared") : isModel ? join(ROOT, "ml") : PUBLIC;
   if (isShared) requestPath = requestPath.slice("shared/".length);
+  if (isModel) requestPath = requestPath.slice("ml/".length);
   const filePath = normalize(join(base, requestPath));
   const pathFromBase = relative(base, filePath);
   const escapesBase = pathFromBase === ".." || pathFromBase.startsWith(`..${sep}`) || isAbsolute(pathFromBase);

@@ -22,6 +22,9 @@ for (const t of [38, 39, 40, 41, 42, 43, 48]) GROUP_OF[t] = 11;
 
 export const VALUE_INPUT_DIM = 2890;
 let weights = null;
+// Side filter for A/B benches: null = NN scores both colors, else only listed.
+let nnColors = null;
+export function setNNColors(colors) { nnColors = colors ? [...colors] : null; }
 
 export function loadValueNet(json) {
   if (!json || json.v !== 1 || json.input_dim !== VALUE_INPUT_DIM || !Array.isArray(json.layers) || json.layers.length !== 3) {
@@ -75,6 +78,7 @@ function forward(x) {
 // White-centric tanh -> perspective centipawns blended with handcrafted eval.
 export function nnBonus(game, perspective, scale = 1500) {
   if (!weights) return 0;
+  if (nnColors && !nnColors.includes(perspective)) return 0;
   // Lazy import avoided: caller passes encoded boards/globals via game.
   // We encode here from live game to keep call sites one-liners.
   const boards = {};

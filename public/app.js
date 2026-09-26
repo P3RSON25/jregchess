@@ -2,6 +2,15 @@ import {
   GameState, COLORS, LARGE_SIZES, RULE_DESCRIPTIONS, RULE_ICONS, RULE_PICKER, SHOP_ITEMS, UPGRADES, imageKey
 } from "/shared/game.js";
 import { planBotTurn } from "/shared/bot.js";
+import { loadValueNet, valueNetLoaded } from "/shared/valueNet.js";
+
+let nnStatus = "handcrafted eval";
+// Learned eval is optional: ml/value_v1.json is served at /ml/*.json when
+// training has produced weights. Missing file = silent fallback, no error UI.
+fetch("/ml/value_v1.json", { cache: "no-store" })
+  .then(response => { if (!response.ok) throw new Error("no weights"); return response.json(); })
+  .then(json => { loadValueNet(json); nnStatus = "neural eval"; renderStatus(); })
+  .catch(() => { nnStatus = "handcrafted eval"; });
 
 const $ = selector => document.querySelector(selector);
 const menu = $("#menu");
@@ -338,8 +347,8 @@ function cycleViewBoard() {
 
 function renderStatus() {
   const status = $("#connection-status");
-  if (botGame) status.textContent = `Bot game (${botDifficulty})`;
-  else if (!isOnline()) status.textContent = "Local hot-seat";
+  if (botGame) status.textContent = `Bot game (${botDifficulty}${valueNetLoaded() ? " + NN" : ""})`;
+  else if (!isOnline()) status.textContent = `Local hot-seat · ${nnStatus}`;
   else if (!connected) status.textContent = "Disconnected";
   else status.textContent = localRole === "spectator" ? "Spectating" : `Player ${localRole}`;
   if (room && game) {
