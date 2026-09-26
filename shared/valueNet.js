@@ -76,7 +76,7 @@ function forward(x) {
 }
 
 // White-centric tanh -> perspective centipawns blended with handcrafted eval.
-export function nnBonus(game, perspective, scale = 1500) {
+export function nnBonus(game, perspective, scale = 500) {
   if (!weights) return 0;
   if (nnColors && !nnColors.includes(perspective)) return 0;
   // Lazy import avoided: caller passes encoded boards/globals via game.

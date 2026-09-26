@@ -24,9 +24,10 @@ const OUT = args.out || "data/selfplay.jsonl";
 const EVERY = Number(args.every || 2);
 const MAX_PLIES = Number(args.maxPlies || 250);
 const OFFSET = Number(args.offset || 0);
+const APPEND = args.append === "true" || args.append === "1";
 
 mkdirSync(dirname(OUT), { recursive: true });
-writeFileSync(OUT, "");
+if (!APPEND) writeFileSync(OUT, "");
 let positions = 0;
 
 function applyPlan(game, plan) {

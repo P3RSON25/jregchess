@@ -97,6 +97,7 @@ def main():
     ap.add_argument("--batch", type=int, default=1024)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--max-rows", type=int, default=0)
+    ap.add_argument("--val-frac", type=float, default=0.1)
     a = ap.parse_args()
 
     import torch
@@ -117,17 +118,35 @@ def main():
     opt = torch.optim.Adam(net.parameters(), lr=a.lr)
     loss_fn = nn.MSELoss()
     n = len(X)
+    n_val = max(1, int(n * a.val_frac))
+    perm_all = torch.randperm(n)
+    val_idx = perm_all[:n_val].to(device)
+    train_idx = perm_all[n_val:].to(device)
+    n_train = len(train_idx)
+    Xv, yv = X[val_idx], y[val_idx]
+    best_val = float("inf")
+    best_state = None
     for ep in range(a.epochs):
-        perm = torch.randperm(n, device=device)
+        perm = train_idx[torch.randperm(n_train)]
         tot = 0.0
-        for i in range(0, n, a.batch):
+        net.train()
+        for i in range(0, n_train, a.batch):
             idx = perm[i:i + a.batch]
             opt.zero_grad()
             loss = loss_fn(net(X[idx]), y[idx])
             loss.backward()
             opt.step()
             tot += loss.item() * len(idx)
-        print(f"epoch {ep + 1}/{a.epochs} mse={tot / n:.4f}", flush=True)
+        net.eval()
+        with torch.no_grad():
+            val = loss_fn(net(Xv), yv).item()
+        if val < best_val:
+            best_val = val
+            best_state = {k: v.cpu().clone() for k, v in net.state_dict().items()}
+        print(f"epoch {ep + 1}/{a.epochs} train_mse={tot / n_train:.4f} val_mse={val:.4f}", flush=True)
+    if best_state is not None:
+        net.load_state_dict({k: v.to(device) for k, v in best_state.items()})
+        print(f"restored best val_mse={best_val:.4f}")
 
     # Export to JSON for shared/valueNet.js
     layers = []
