@@ -662,7 +662,7 @@ function staticScoreForOrdering(game, action, perspective, invCtx = null) {
 const TT = new Map();
 let TT_HITS = 0;
 export function ttStats() { return { size: TT.size, hits: TT_HITS }; }
-export function clearTT() { TT.clear(); TT_HITS = 0; }
+export function clearTT() { TT.clear(); TT_HITS = 0; KILLERS = []; HISTORY.clear(); }
 function snapshotKey(game) {
   let h = game.whiteToMove ? "W" : "B";
   h += `|${game.whiteGP},${game.blackGP}|${game.rules.length}|`;
@@ -685,6 +685,46 @@ function isKingCapture(game, action) {
     const v = game.leader(t);
     return v.type === "King" || v.type === "SuperKing";
   } catch { return false; }
+}
+
+// Victim value for quiescence budgeting: pieces below threshold stand pat.
+// Coins/Treasure always extend (free GP swings decide endgames).
+function quiesceValue(game, action) {
+  if (action.action !== "move") return 0;
+  try {
+    const t = game.getCell(action.to.x, action.to.y, action.board);
+    if (!t) return 0;
+    const v = game.leader(t);
+    if (v.type === "King" || v.type === "SuperKing") return 20000;
+    if (v.type === "Coin" || v.type === "Treasure") return 500;
+    return PIECE_VALUES[v.type] ?? 0;
+  } catch { return 0; }
+}
+const QUIESCE_MIN = 250; // rook-class and up, plus coins/treasure
+const QUIESCE_MAX_TAKES = 10;
+
+// Killer moves (per-depth, 2 slots) + history table: cheap cutoffs fund depth.
+// Cleared per root search alongside the TT.
+let KILLERS = [];
+const HISTORY = new Map();
+function killerBonus(depth, action) {
+  if (action.action !== "move") return 0;
+  const k = `${action.board}:${action.from.x},${action.from.y}>${action.to.x},${action.to.y}`;
+  const slot = KILLERS[depth];
+  if (slot && slot.includes(k)) return 800;
+  return Math.min(600, (HISTORY.get(k) || 0) / 8);
+}
+function recordCutoff(depth, game, action) {
+  // Captures skip: MVV-LVA already orders them. Quiets that refute get killers.
+  try {
+    if (action.action !== "move" || quiesceValue(game, action) > 0) return;
+  } catch { return; }
+  const k = `${action.board}:${action.from.x},${action.from.y}>${action.to.x},${action.to.y}`;
+  if (!KILLERS[depth]) KILLERS[depth] = [];
+  const slot = KILLERS[depth];
+  if (!slot.includes(k)) { slot.unshift(k); if (slot.length > 2) slot.pop(); }
+  HISTORY.set(k, Math.min(5000, (HISTORY.get(k) || 0) + depth * depth));
+  if (HISTORY.size > 20000) HISTORY.clear();
 }
 
 // Time-capped search: iterative deepening aborts cleanly and keeps best-so-far,
@@ -737,19 +777,22 @@ function search(game, depth, alpha, beta, perspective, isRoot = false, qdepth = 
   const maximizing = turnColor === perspective;
   if (depth <= 0) {
     const stand = evaluate(game, perspective);
-    // Quiescence: extend ONLY king captures at frontier (max qdepth), so
-    // horizon blunders on last kings don't slip through. Everything else
-    // returns stand-pat with beta cutoff.
+    // Quiescence: extend valuable captures at the frontier (kings, rook-class
+    // and up, coins/treasure) so horizon takes resolve instead of standing
+    // pat misevaluated. Capped by qdepth and take count; beta cutoffs apply.
     if (qdepth <= 0) return stand;
     if (maximizing && stand >= beta) return stand;
     if (!maximizing && stand <= alpha) return stand;
     const testNode = game;
-    const kingTakes = enumerateMoves(testNode, 220).filter(a => isKingCapture(testNode, a)).slice(0, 8);
-    if (!kingTakes.length) return stand;
+    const takes = enumerateMoves(testNode, 220)
+      .filter(a => quiesceValue(testNode, a) >= QUIESCE_MIN)
+      .sort((x, y) => quiesceValue(testNode, y) - quiesceValue(testNode, x))
+      .slice(0, QUIESCE_MAX_TAKES);
+    if (!takes.length) return stand;
     const snapQ = testNode.toSnapshot();
     if (maximizing) {
       let best = stand;
-      for (const a of kingTakes) {
+      for (const a of takes) {
         const { sim, ok } = cloneApply(snapQ, a);
         if (!ok) continue;
         const v = search(sim, 0, Math.max(alpha, best), beta, perspective, false, qdepth - 1);
@@ -759,7 +802,7 @@ function search(game, depth, alpha, beta, perspective, isRoot = false, qdepth = 
       return best;
     } else {
       let best = stand;
-      for (const a of kingTakes) {
+      for (const a of takes) {
         const { sim, ok } = cloneApply(snapQ, a);
         if (!ok) continue;
         const v = search(sim, 0, alpha, Math.min(beta, best), perspective, false, qdepth - 1);
@@ -792,9 +835,10 @@ function search(game, depth, alpha, beta, perspective, isRoot = false, qdepth = 
   if (!actions.length) return evaluate(node, perspective);
   // Order + prune to keep branching sane. Depth-3+ callers pass narrow
   // widths via opts; default preserves shipped depth-2 behavior exactly.
+  // Killer/history refutations (recorded below on cutoffs) order first.
   const width = widthFor(depth, actions.length);
   actions = actions
-    .map(a => ({ a, s: staticScoreForOrdering(node, a, perspective) }))
+    .map(a => ({ a, s: staticScoreForOrdering(node, a, perspective) + killerBonus(depth, a) }))
     .sort((x, y) => y.s - x.s)
     .slice(0, width)
     .map(e => e.a);
@@ -811,7 +855,7 @@ function search(game, depth, alpha, beta, perspective, isRoot = false, qdepth = 
       const v = search(sim, depth - 1, alpha, beta, perspective, false, qdepth);
       if (v > best) best = v;
       if (v > alpha) alpha = v;
-      if (beta <= alpha) break;
+      if (beta <= alpha) { recordCutoff(depth, node, a); break; }
       if (SEARCH_TIMEOUT) break;
     }
     if (best === -Infinity) return evaluate(node, perspective);
@@ -824,7 +868,7 @@ function search(game, depth, alpha, beta, perspective, isRoot = false, qdepth = 
       const v = search(sim, depth - 1, alpha, beta, perspective, false, qdepth);
       if (v < best) best = v;
       if (v < beta) beta = v;
-      if (beta <= alpha) break;
+      if (beta <= alpha) { recordCutoff(depth, node, a); break; }
       if (SEARCH_TIMEOUT) break;
     }
     if (best === Infinity) return evaluate(node, perspective);
