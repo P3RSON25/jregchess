@@ -55,9 +55,12 @@ test("policy side filter gates ordering per color", () => {
 });
 
 test("real policy weights agree with trainer indexing", () => {
-  if (!existsSync("ml/policy_v1.json")) return; // weights are git-ignored; CI skips
+  // v2 preferred (current-strength distribution), v1 fallback — as in app.js.
+  const path = existsSync("ml/policy_v2.json") ? "ml/policy_v2.json"
+    : existsSync("ml/policy_v1.json") ? "ml/policy_v1.json" : null;
+  if (!path) return; // weights are git-ignored; CI skips
   const game = new GameState({ seed: "policy-real" });
-  loadPolicyNet(JSON.parse(readFileSync("ml/policy_v1.json", "utf8")));
+  loadPolicyNet(JSON.parse(readFileSync(path, "utf8")));
   const logits = policyLogits(game);
   assert.equal(logits.length, 192);
   assert.ok(logits.some(v => v !== 0));

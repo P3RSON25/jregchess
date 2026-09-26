@@ -12,10 +12,14 @@ fetch("/ml/value_v1.json", { cache: "no-store" })
   .then(response => { if (!response.ok) throw new Error("no weights"); return response.json(); })
   .then(json => { loadValueNet(json); nnStatus = "neural eval"; renderStatus(); })
   .catch(() => { nnStatus = "handcrafted eval"; });
-fetch("/ml/policy_v1.json", { cache: "no-store" })
-  .then(response => { if (!response.ok) throw new Error("no policy"); return response.json(); })
+// Policy v2 (trained on current-strength play) preferred, v1 as fallback.
+fetch("/ml/policy_v2.json", { cache: "no-store" })
+  .then(response => { if (!response.ok) throw new Error("no v2"); return response.json(); })
   .then(json => { loadPolicyNet(json); renderStatus(); })
-  .catch(() => {});
+  .catch(() => fetch("/ml/policy_v1.json", { cache: "no-store" })
+    .then(response => { if (!response.ok) throw new Error("no policy"); return response.json(); })
+    .then(json => { loadPolicyNet(json); renderStatus(); })
+    .catch(() => {}));
 
 const $ = selector => document.querySelector(selector);
 const menu = $("#menu");

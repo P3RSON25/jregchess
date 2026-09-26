@@ -28,6 +28,7 @@ const MAX_PLIES = Number(args.maxPlies || 250);
 const OFFSET = Number(args.offset || 0);
 const APPEND = args.append === "true" || args.append === "1";
 const SEED_TAG = args.seedTag || "a";
+const POLICY = args.policy || null;
 const JOBS = Math.max(1, Math.min(Number(args.jobs || cpus().length), GAMES));
 
 mkdirSync(dirname(OUT), { recursive: true });
@@ -47,7 +48,7 @@ for (let j = 0; j < JOBS; j++) {
   const count = base + (j < rem ? 1 : 0);
   workers.push(new Promise((resolve, reject) => {
     const w = new Worker(workerPath, {
-      workerData: { start, count, white: WHITE, black: BLACK, every: EVERY, maxPlies: MAX_PLIES, seedTag: SEED_TAG },
+      workerData: { start, count, white: WHITE, black: BLACK, every: EVERY, maxPlies: MAX_PLIES, seedTag: SEED_TAG, policy: POLICY },
     });
     w.on("message", msg => {
       if (msg.type === "progress") {

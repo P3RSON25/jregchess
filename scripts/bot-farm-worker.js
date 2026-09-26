@@ -1,11 +1,26 @@
 // Farm worker: plays an assigned slice of selfplay games, posts JSONL back.
 // Runs inside node:worker_threads, spawned by scripts/bot-farm.js.
 import { parentPort, workerData } from "node:worker_threads";
+import { readFileSync, existsSync } from "node:fs";
 import { GameState } from "../shared/game.js";
 import { planBotTurn } from "../shared/bot.js";
 import { encodePosition } from "../shared/features.js";
+import { loadPolicyNet, setPolicyColors } from "../shared/policyNet.js";
 
-const { start, count, white, black, every, maxPlies, seedTag } = workerData;
+const { start, count, white, black, every, maxPlies, seedTag, policy } = workerData;
+
+// New-strength data: both sides use the shipped policy when requested.
+// Value net stays unloaded (per-eval forwards are too slow for selfplay).
+let policyTag = "none";
+if (policy) {
+  try {
+    if (existsSync(policy)) {
+      loadPolicyNet(JSON.parse(readFileSync(policy, "utf8")));
+      setPolicyColors(null);
+      policyTag = policy.split("/").pop().replace(".json", "");
+    }
+  } catch { /* fall back to base strength */ }
+}
 
 function applyPlan(game, plan) {
   for (const u of plan.upgrades || []) {
@@ -41,7 +56,7 @@ for (let i = 0; i < count; i++) {
     plies++;
   }
   const result_w = !game.gameOver ? 0 : game.draw ? 0 : game.winner === "White" ? 1 : -1;
-  for (const p of buf) lines.push(JSON.stringify({ ...p, result_w, seed: g, timeout: !game.gameOver }));
+  for (const p of buf) lines.push(JSON.stringify({ ...p, result_w, seed: g, timeout: !game.gameOver, pol: policyTag }));
   positions += buf.length;
   parentPort.postMessage({ type: "progress", done: i + 1, positions });
 }
