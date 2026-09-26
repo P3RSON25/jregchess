@@ -7,6 +7,7 @@
 // alpha-beta with upgrade closure. Deterministic given GameState RNG state
 // (automover sampling uses the cloned RNG, same as real game).
 import { GameState, SHOP_ITEMS, UPGRADES, RULE_PICKER, COLORS } from "./game.js";
+import { nnBonus } from "./valueNet.js";
 
 export const BOT_DIFFICULTIES = ["easy", "normal", "hard"];
 
@@ -186,6 +187,8 @@ export function evaluate(game, perspective) {
       if (n === totalMine && (b === "Heaven" || b === "Hell")) score -= 250;
     }
   }
+  // Learned value head (zero-effect until ml/value_v1.json is loaded).
+  try { score += nnBonus(game, me); } catch { /* NN optional */ }
   return score;
 }
 evaluate._fast = false;
