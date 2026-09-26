@@ -42,6 +42,8 @@ let whiteWins = 0, blackWins = 0, draws = 0, timeouts = 0;
 let illegal = 0;
 let crashes = 0;
 let totalPlies = 0;
+const buyTally = {};
+let portalBuys = 0;
 const illegalLog = [];
 const t0 = Date.now();
 
@@ -57,6 +59,10 @@ for (let g = OFFSET; g < OFFSET + GAMES; g++) {
           : (game.whiteToMove ? WHITE_DIFF : BLACK_DIFF);
       const plan = planBotTurn(game, diff);
       if (!plan) { illegal++; illegalLog.push(`game ${g} ply ${plies}: planBotTurn returned null`); break; }
+      if (plan.action?.action === "buy") {
+        buyTally[plan.action.id] = (buyTally[plan.action.id] || 0) + 1;
+        if (plan.action.id === "portal") portalBuys++;
+      }
       const res = applyPlan(game, plan);
       if (res.illegal) {
         illegal++;
@@ -91,6 +97,7 @@ for (let g = OFFSET; g < OFFSET + GAMES; g++) {
 console.log(`\n=== BOT BENCH ${GAMES} games ${WHITE_DIFF}(W) vs ${BLACK_DIFF}(B), maxPlies ${MAX_PLIES} ===`);
 console.log(`White wins: ${whiteWins} | Black wins: ${blackWins} | Draws: ${draws} | Timeouts(unfinished): ${timeouts}`);
 console.log(`Illegal-move games: ${illegal} | Crashes: ${crashes} | Avg plies: ${(totalPlies / GAMES).toFixed(1)} | Total time: ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+console.log(`Shop tally: ${JSON.stringify(buyTally)} | portal buys/1000 games: ${(portalBuys / GAMES * 1000).toFixed(1)}`);
 if (illegalLog.length) {
   console.log(`\nFirst illegal/crash samples:`);
   for (const line of illegalLog.slice(0, 10)) console.log(` - ${line}`);

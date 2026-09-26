@@ -9,6 +9,11 @@
 import { GameState, SHOP_ITEMS, UPGRADES, RULE_PICKER, COLORS } from "./game.js";
 import { nnBonus } from "./valueNet.js";
 import { policyLogits, policyBonusFor, policyNetLoaded, policyAppliesTo } from "./policyNet.js";
+import {
+  armedTargets, findAtheisms, portalBuyValue, forcedAtheismChoice,
+  invasionDistances, invasionProjectStep,
+  ATHEISM_CAPTURE_BONUS, PROGRESS_PULL_CAP,
+} from "./invasion.js";
 
 export const BOT_DIFFICULTIES = ["easy", "normal", "hard"];
 
@@ -339,7 +344,7 @@ export function enumerateMoves(game, maxMoves = 400) {
 
 // Shop buys pruned to sensible candidates. Full cross product (17 items x
 // ~40 squares) is 500+ actions; we cap to limit*items strategic spots.
-export function enumerateBuys(game, limit = 36) {
+export function enumerateBuys(game, limit = 36, opts = {}) {
   const out = [];
   if (!game.board("Normal")) return out;
   const funds = game.funds();
@@ -363,8 +368,16 @@ export function enumerateBuys(game, limit = 36) {
   const spots = ranked.slice(0, 10);
 
   // Strategic item filter: never buy obviously bad items when broke.
+  // forceItems (e.g. portal during an armed invasion) bypass the top-6 cut.
   const priority = ["king", "queen", "knight-queen", "rook", "knight", "bishop", "pawn", "unicorn", "angry-rook", "rook-knight", "bishop-knight", "portal", "zebra", "giraffe", "jester", "landmine", "bomb"];
   const items = affordable.sort((a, b) => priority.indexOf(a[0]) - priority.indexOf(b[0])).slice(0, 6);
+  if (opts.forceItems) {
+    for (const id of opts.forceItems) {
+      if (!items.some(([itemId]) => itemId === id) && affordable.some(([itemId]) => itemId === id)) {
+        items.push(affordable.find(([itemId]) => itemId === id));
+      }
+    }
+  }
   for (const [id] of items) {
     const type = pieceTypeOf(id);
     for (const s of spots) {
@@ -400,6 +413,10 @@ export function chooseDecision(game) {
     return diff < -200 ? "yes" : "no";
   }
   if (d.type === "atheism") {
+    // Verified forced win first: if destroying X ends the game now, all other
+    // considerations (material, bunkers) are moot — victory is immediate.
+    const forced = forcedAtheismChoice(game);
+    if (forced) return forced;
     const mine = kingsPerBoard(game, color);
     const theirs = kingsPerBoard(game, opp(color));
     const myTotal = Object.values(mine).reduce((a, b) => a + b, 0);
@@ -486,14 +503,21 @@ const UPGRADE_VALUE_HINT = {
   "super-king": 1600, "ball-queen": 220, "knight-queen": 420, "angry-rook": 190, "rook-tower": -120,
 };
 
-export function planUpgrades(game, maxUpgrades = 6) {
+export function planUpgrades(game, maxUpgrades = 6, opts = {}) {
   // Returns list of upgrade actions that are +EV on successive clones.
-  // Does not mutate the input game.
+  // Does not mutate the input game. reserveGP keeps funds for a verified
+  // invasion portal buy: a forced dimension win outranks any local upgrade,
+  // so upgrades that would spend below the reserve are skipped when armed.
+  const reserveGP = opts.reserveGP || 0;
   const planned = [];
   let sim = GameState.fromSnapshot(game.toSnapshot());
   for (let i = 0; i < maxUpgrades; i++) {
     const cands = enumerateUpgrades(sim);
     if (!cands.length) break;
+    if (reserveGP > 0) {
+      const funds = sim.whiteToMove ? sim.whiteGP : sim.blackGP;
+      if (funds - 5 < reserveGP) break;
+    }
     let best = null, bestGain = 60; // must beat 5GP cost (5*50=250)? No: value hints already net. Threshold avoids junk.
     for (const u of cands) {
       const piece = sim.getCell(u.x, u.y, u.board);
@@ -527,9 +551,27 @@ function cloneApply(snapshot, action) {
   return { sim, ok };
 }
 
-function staticScoreForOrdering(game, action, perspective) {
+function staticScoreForOrdering(game, action, perspective, invCtx = null) {
   // MVV-LVA-ish + buy/upgrade priors for move ordering.
   let s = 0;
+  // Verified game-winning lines outrank even direct king takes: a king
+  // capture only sometimes ends the game, an armed atheism capture always
+  // does (verified by armedTargets). invCtx is built (rarely — only when an
+  // atheism win is armed) by the hard root; deeper nodes use plain scores.
+  // Never touches evaluate().
+  if (invCtx?.armed?.length && action.action === "move") {
+    const key = `${action.board}:${action.to.x},${action.to.y}`;
+    if (invCtx.atheismCells.has(key)) return 20000 + ATHEISM_CAPTURE_BONUS;
+    const from = action.from;
+    const d0 = invCtx.dist.get(`${action.board}:${from.x},${from.y}`);
+    const d1 = invCtx.dist.get(key);
+    if (d0 !== undefined && d1 !== undefined && d1 < d0) {
+      s += Math.min(PROGRESS_PULL_CAP, (d0 - d1) * 150);
+    }
+  }
+  if (invCtx?.armed?.length && action.action === "buy" && action.id === "portal") {
+    s += portalBuyValue(game, action.x, action.y, perspective);
+  }
   if (action.action === "move") {
     const target = game.getCell(action.to.x, action.to.y, action.board);
     if (target) {
@@ -779,9 +821,28 @@ export function chooseMainAction(game, difficulty = "normal", opts = {}) {
   if (policyNetLoaded() && policyAppliesTo(color)) {
     try { logits = policyLogits(game); } catch { logits = null; }
   }
+  // Invasion context: built only when an atheism win is armed (rare). Ensures
+  // portal buys are even enumerated, then verified, then prioritized.
+  const armed = armedTargets(game, color);
+  let invCtx = null;
+  let rootActions = all;
+  if (armed.length) {
+    const cells = new Set();
+    for (const a of findAtheisms(game)) {
+      for (const c of game.footprint("Atheism", a.x, a.y)) cells.add(`${a.board}:${c.x},${c.y}`);
+    }
+    const { dist } = invasionDistances(game, color);
+    invCtx = { armed, atheismCells: cells, dist };
+    const extra = enumerateBuys(game, 36, { forceItems: ["portal"] });
+    const seen = new Set(rootActions.map(a => JSON.stringify(a)));
+    for (const b of extra) {
+      const k = JSON.stringify(b);
+      if (!seen.has(k)) { seen.add(k); rootActions = [...rootActions, b]; }
+    }
+  }
   const snap = game.toSnapshot();
-  const ordered = all
-    .map(a => ({ a, s: staticScoreForOrdering(game, a, color) + policyBonusFor(logits, a) }))
+  const ordered = rootActions
+    .map(a => ({ a, s: staticScoreForOrdering(game, a, color, invCtx) + policyBonusFor(logits, a) }))
     .sort((x, y) => y.s - x.s)
     .slice(0, 26)
     .map(e => e.a);
@@ -828,7 +889,11 @@ export function planBotTurn(game, difficulty = "normal", opts = {}) {
   if (game.rulePicker) {
     return { upgrades: [], action: { action: "rule", rule: chooseRule(game) }, kind: "rule" };
   }
-  const upgrades = planUpgrades(game, difficulty === "easy" ? 2 : 6);
+  // Reserve portal money when an atheism win is armed (kings don't move on
+  // upgrade, so the pre-upgrade ledger is valid for the post-upgrade node).
+  const turnColor = game.whiteToMove ? "White" : "Black";
+  const reserveGP = (difficulty !== "easy" && armedTargets(game, turnColor).length) ? 4 : 0;
+  const upgrades = planUpgrades(game, difficulty === "easy" ? 2 : 6, { reserveGP });
   // Simulate upgrades to choose main action from post-upgrade position.
   let node = game;
   if (upgrades.length) {
@@ -840,6 +905,16 @@ export function planBotTurn(game, difficulty = "normal", opts = {}) {
     if (node.gameOver || node.pendingDecision || node.rulePicker) {
       return { upgrades, action: null, kind: "upgrade-only" };
     }
+  }
+  // Invasion project (normal/hard only — easy stays dumb): when an atheism
+  // win is armed, commit to the verified route's next step instead of asking
+  // search to value what it can't see. Re-planned every turn from the
+  // post-upgrade position; disarms automatically when conditions change.
+  if (difficulty !== "easy" && !node.pendingDecision && !node.rulePicker) {
+    const nodeColor = node.whiteToMove ? "White" : "Black";
+    let step = null;
+    try { step = invasionProjectStep(node, nodeColor); } catch { step = null; }
+    if (step) return { upgrades, action: step, kind: `invasion:${step.action}` };
   }
   const main = chooseMainAction(node, difficulty, opts);
   if (!main && !upgrades.length) return null;
