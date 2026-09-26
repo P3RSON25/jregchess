@@ -9,7 +9,7 @@
 // Adjudication: at maxPlies, evaluate() from White's view decides:
 //   > +cp white wins, < -cp black wins, else draw. Reported separately.
 import { GameState } from "../shared/game.js";
-import { planBotTurn, evaluate } from "../shared/bot.js";
+import { planBotTurn, evaluate, setExposureEnabled } from "../shared/bot.js";
 import { loadPolicyNet, setPolicyColors } from "../shared/policyNet.js";
 import { readFileSync } from "node:fs";
 
@@ -39,6 +39,7 @@ if (args.policy) {
   if (flag("blackPolicy")) sides.push("Black");
   setPolicyColors(sides.length ? sides : []);
 }
+if (flag("noExposure")) setExposureEnabled(false);
 
 function sideCfg(prefix, fallbackDiff) {
   return {

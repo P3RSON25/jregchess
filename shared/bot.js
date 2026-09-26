@@ -177,20 +177,28 @@ export function evaluate(game, perspective) {
   // King exposure: no check, so kings should stay screened. Penalize enemy
   // piece proximity to our kings, reward proximity to enemy kings (hunt).
   score += kingHuntBonus(game, me) - kingHuntBonus(game, enemy);
+  // Hard exposure: enemy pieces that can CAPTURE our king now (no-check
+  // emergencies), minus the same for theirs. Symmetric by construction.
+  if (EXPOSURE_ON) score += kingExposure(game, enemy) - kingExposure(game, me);
 
   // Automover danger: pieces standing where hostile zombies/wildlife/meteors
   // will drift next turn are discounted. Small static penalty.
   score -= automoverThreat(game, me) * 12;
   score += automoverThreat(game, enemy) * 12;
 
-  // Dimension destruction risk: if our ONLY kings live on Heaven/Hell and an
-  // enemy-favoring atheism decision could appear, discount. Computed cheaply:
-  // if all our kings are on one destructible board, small penalty.
-  const mine = kingsPerBoard(game, me);
-  const totalMine = Object.values(mine).reduce((a, b) => a + b, 0);
-  if (totalMine > 0) {
-    for (const [b, n] of Object.entries(mine)) {
-      if (n === totalMine && (b === "Heaven" || b === "Hell")) score -= 250;
+  // Dimension destruction risk: a side whose ONLY kings live on Heaven/Hell
+  // can be wiped by one atheism decision. Symmetric: our bunker hurts us,
+  // theirs helps us. (Was one-sided -250 for `me` only — a real antisymmetry
+  // bug: same-position eW+eB came out -500 instead of 0.)
+  for (const [side, sign] of [[me, -1], [enemy, 1]]) {
+    const counts = kingsPerBoard(game, side);
+    // Destroyed boards are absent keys, not zeros.
+    const n = dim => counts[dim] || 0;
+    const total = n("Normal") + n("Heaven") + n("Hell");
+    if (total > 0) {
+      for (const b of ["Heaven", "Hell"]) {
+        if (n(b) === total) score += sign * 250;
+      }
     }
   }
   // Learned value head (zero-effect until ml/value_v1.json is loaded).
@@ -233,6 +241,57 @@ function kingPositions(game, color) {
     }
   }
   return out;
+}
+
+let EXPOSURE_ON = true;
+export function setExposureEnabled(v) { EXPOSURE_ON = Boolean(v); }
+export function exposureEnabled() { return EXPOSURE_ON; }
+
+// Exposure: enemy pieces that can CAPTURE our king right now. There is no
+// check in Jreg — kings walk into attack constantly — so the eval must price
+// it explicitly. Symmetric helper: +exposure(us) - exposure(them).
+// Cost model: a forced king flight costs a tempo plus residual risk; full-HP
+// two-life kings (SuperKing) absorb the first hit, so they discount 60%.
+// Alignment prefilter keeps this cheap: validMove (pathClear) runs only for
+// plausibly-aligned attackers.
+function kingExposure(game, color) {
+  const enemy = opp(color);
+  const mine = kingPositions(game, color);
+  if (!mine.length) return 0;
+  const foes = myPiecesEverywhere(game, enemy);
+  let penalty = 0;
+  for (const k of mine) {
+    const twoLife = k.type === "SuperKing";
+    for (const f of foes) {
+      if (f.board !== k.board) continue;
+      if (["Coin", "Treasure", "Portal", "Landmine", "Pittrap", "Whirlpool", "Void", "Church", "Atheism", "Angel", "Devil", "AggroAngel", "AggroDevil", "RookTower"].includes(f.type)) continue;
+      // Uncontrolled automovers drift by their own rules (validMove lies for
+      // them, returning true for any leap); their lane threat is already
+      // priced in automoverThreat. Controlled ones move king-step: real.
+      if (!f.controlledBy && ["Zombie", "WildHorse", "Wildlife", "Meteor"].includes(f.type)) continue;
+      const dx = Math.abs(f.x - k.x);
+      const dy = Math.abs(f.y - k.y);
+      if (dx === 0 && dy === 0) continue;
+      // Cheap alignment reject by mover geometry (pawns capture forward-diag).
+      const t = f.type;
+      const fwd = f.color === "Black" ? 1 : -1;
+      let plausible = false;
+      if (t === "Knight" || t === "Zebra") plausible = (dx === 2 && dy === 1) || (dx === 1 && dy === 2);
+      else if (t === "Giraffe") plausible = (dx === 3 && dy === 1) || (dx === 1 && dy === 3);
+      else if (t === "Unicorn") plausible = ((dx === 2 && dy === 1) || (dx === 1 && dy === 2) || (dx === 2 && dy === 0) || (dx === 0 && dy === 2));
+      else if (t === "Rook" || t === "AngryRook") plausible = (dx === 0 || dy === 0);
+      else plausible = true; // sliders, kings, pawns, wild: verify via validMove
+      if (!plausible) continue;
+      let takes = false;
+      try { takes = game.validMove({ x: f.x, y: f.y }, { x: k.x, y: k.y }, k.board); } catch { takes = false; }
+      if (!takes) continue;
+      // Cheap attackers are the nightmare (lose a king to a pawn); pricey
+      // attackers at least cost the enemy material... which Hell recycles.
+      // Flat emergency price dominates either way.
+      penalty += twoLife ? 160 : 400;
+    }
+  }
+  return penalty;
 }
 
 // Reward our attackers near enemy kings, penalize enemy attackers near ours.
@@ -929,4 +988,4 @@ function hasRoomFor(game, type) {
   return false;
 }
 
-export const __internal = { countKings, kingsPerBoard, kingPositions, evaluateRaw: evaluate, search, hasRoomFor };
+export const __internal = { countKings, kingsPerBoard, kingPositions, evaluateRaw: evaluate, search, hasRoomFor, kingExposure };

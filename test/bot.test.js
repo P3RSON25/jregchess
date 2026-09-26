@@ -112,6 +112,40 @@ test("bot buy candidates respect GP and Normal-only placement", () => {
   }
 });
 
+test("evaluate is exactly antisymmetric (no one-sided terms)", () => {
+  // Guards the class of bug where a discount applied to `me` only (e.g. the
+  // old one-sided Heaven/Hell bunker penalty) broke negamax assumptions.
+  for (const seed of ["sym-a", "sym-b", "sym-c"]) {
+    const game = new GameState({ seed });
+    for (let i = 0; i < 25 && !game.gameOver; i++) {
+      const plan = planBotTurn(game, "normal");
+      if (!plan) break;
+      for (const u of plan.upgrades || []) game.upgrade(u.id, u.x, u.y, u.board);
+      if (!plan.action) break;
+      applyAction(game, plan.action);
+    }
+    if (game.gameOver) continue;
+    assert.equal(evaluate(game, COLORS.WHITE) + evaluate(game, COLORS.BLACK), 0);
+  }
+});
+
+test("king exposure flags en-prise kings and only those", () => {
+  const game = new GameState({ seed: "exp-unit" });
+  game.initializing = true;
+  for (const b of ["Normal", "Heaven", "Hell"]) {
+    for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) {
+      const p = game.getCell(x, y, b);
+      if (p) game.removeGroup(p, b);
+    }
+  }
+  game.placeNew("King", COLORS.WHITE, 4, 4, "Normal");
+  game.placeNew("King", COLORS.BLACK, 0, 0, "Normal");
+  game.placeNew("Rook", COLORS.BLACK, 4, 0, "Normal"); // same file, clear path
+  game.initializing = false;
+  assert.ok(botInternal.kingExposure(game, COLORS.WHITE) >= 400);
+  assert.equal(botInternal.kingExposure(game, COLORS.BLACK), 0);
+});
+
 test("search survives a rejected Angel release on a crowded board", () => {
   // Regression: chooseDecision picked angel-"yes" with no 2x2 room, the engine
   // rejected it, and search retried the same state forever (stack overflow).
