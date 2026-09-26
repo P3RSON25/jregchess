@@ -105,6 +105,7 @@ export function evaluate(game, perspective) {
   // If enemy down to last king, hunt bonus; if we are, fear bonus.
   if (opKings === 1) score += 800;
   if (myKings === 1) score -= 800;
+  if (opKings === 0 && myKings === 0) return 0; // mutual wipe = draw, not +1M both ways
   if (opKings === 0) return 1000000;
   if (myKings === 0) return -1000000;
 
@@ -131,7 +132,8 @@ export function evaluate(game, perspective) {
       }
       if (p.type === "AggroDevil" && p.health) {
         const hpBonus = (p.health - 1) * 60;
-        score += (p.color === me ? hpBonus : p.color === enemy ? -hpBonus : hpBonus * 0.2);
+        // NPC devils belong to neither side: score 0, not +20% both ways.
+        score += (p.color === me ? hpBonus : p.color === enemy ? -hpBonus : 0);
       }
     }
   }

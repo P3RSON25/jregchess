@@ -241,32 +241,17 @@ export function huntProjectStep(game, color) {
   if (ownKingInDanger(game, color)) return null;
 
   const hunters = ownLeaders(game, color).filter(p => !UNHUNTABLE.has(p.type));
-  let best = null;
-  for (const root of hunters) {
-    const { dist, prev } = bfsFrom(game, root.board, root.x, root.y);
-    const rootKey = `${root.board}:${root.x},${root.y}`;
-    for (const k of enemyKings) {
-      for (const kc of game.footprint(k.type, k.x, k.y)) {
-        const t = `${k.board}:${kc.x},${kc.y}`;
-        if (!dist.has(t) || dist.get(t) > HUNT_ROUTE_MAX) continue;
-        if (!best || dist.get(t) < best.d) {
-          const first = firstStepAlong(prev, rootKey, t);
-          if (first) best = { d: dist.get(t), root, first };
-        }
-      }
-    }
+  const toKing = enemyKingDistances(game, color);
+  const rankedHunters = hunters
+    .map(root => ({ root, d: toKing.get(`${root.board}:${root.x},${root.y}`) ?? Infinity }))
+    .filter(e => e.d !== Infinity && e.d <= HUNT_ROUTE_MAX)
+    .sort((a, b) => a.d - b.d)
+    .slice(0, 6);
+  for (const { root } of rankedHunters) {
+    const steps = stepNeighbors(toKing, game, root);
+    if (steps.length) return steps[0];
   }
-  if (best) {
-    const { b: fb, x: fx, y: fy } = parseKey(best.first);
-    if (fb === best.root.board) {
-      try {
-        if (game.validMove({ x: best.root.x, y: best.root.y }, { x: fx, y: fy }, fb)) {
-          return { action: "move", from: { x: best.root.x, y: best.root.y }, to: { x: fx, y: fy }, board: fb };
-        }
-      } catch { /* fall through to portal buy */ }
-    }
-    // Cross-board first step (standing on a portal) has no single-turn move.
-  }
+  // No walkable step (blocked boards or standing on a portal): portal buy below.
 
   // No walkable step (usually: another board, no portals): a sim-verified
   // portal buy that opens a short route. Rare + capped like the invasion buy.
@@ -294,30 +279,12 @@ export function huntProjectStep(game, color) {
 
 // Shortest hunter->enemy-king BFS length (same rules as the project step).
 export function huntRouteLength(game, color) {
-  const seen = new Set();
-  const kings = [];
-  for (const b of game.activeBoardNames()) {
-    for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) {
-      const p = game.board(b)[y][x];
-      if (!p || (p.type !== "King" && p.type !== "SuperKing")) continue;
-      const root = game.leader(p);
-      const id = root.group || root.uid;
-      if (seen.has(id) || root.color === color) continue;
-      seen.add(id);
-      kings.push(root);
-    }
-  }
-  if (!kings.length || kings.length > HUNT_MAX_KINGS) return null;
+  const dist = enemyKingDistances(game, color);
   const hunters = ownLeaders(game, color).filter(p => !UNHUNTABLE.has(p.type));
   let best = null;
   for (const root of hunters) {
-    const { dist } = bfsFrom(game, root.board, root.x, root.y);
-    for (const k of kings) {
-      for (const kc of game.footprint(k.type, k.x, k.y)) {
-        const t = `${k.board}:${kc.x},${kc.y}`;
-        if (dist.has(t) && (best === null || dist.get(t) < best)) best = dist.get(t);
-      }
-    }
+    const d = dist.get(`${root.board}:${root.x},${root.y}`);
+    if (d !== undefined && (best === null || d < best)) best = d;
   }
   return best;
 }
@@ -348,15 +315,6 @@ function ownLeaders(game, color) {
   return out;
 }
 
-// First node on the BFS path from rootKey toward targetKey (null if the
-// target is the root itself or unreachable in prev).
-function firstStepAlong(prev, rootKey, targetKey) {
-  if (targetKey === rootKey || !prev.has(targetKey)) return null;
-  let cur = targetKey;
-  while (prev.has(cur) && prev.get(cur) !== rootKey) cur = prev.get(cur);
-  return prev.get(cur) === rootKey ? cur : null;
-}
-
 function parseKey(key) {
   const sep = key.indexOf(":");
   const b = key.slice(0, sep);
@@ -364,25 +322,87 @@ function parseKey(key) {
   return { b, x, y };
 }
 
-// Single-source BFS distances from one piece (king-step adjacency + portal
-// edges, blockers ignored). Returns { dist: Map, prev: Map }.
-function bfsFrom(game, startBoard, startX, startY) {
+function stepNeighbors(dist, game, root) {
+  // All same-board validated steps that shorten a reverse-BFS distance map.
+  // Nearest-first ordering happens at the caller.
+  const d0 = dist.get(`${root.board}:${root.x},${root.y}`);
+  if (d0 === undefined) return [];
+  const steps = [];
+  for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+    if (!dx && !dy) continue;
+    const nx = root.x + dx, ny = root.y + dy;
+    if (nx < 0 || nx > 7 || ny < 0 || ny > 7) continue;
+    const nd = dist.get(`${root.board}:${nx},${ny}`);
+    if (nd === undefined || nd >= d0) continue;
+    steps.push({ x: nx, y: ny, nd });
+  }
+  steps.sort((a, b) => a.nd - b.nd);
+  const out = [];
+  for (const s of steps) {
+    try {
+      if (game.validMove({ x: root.x, y: root.y }, { x: s.x, y: s.y }, root.board)) {
+        out.push({ action: "move", from: { x: root.x, y: root.y }, to: { x: s.x, y: s.y }, board: root.board });
+      }
+    } catch { /* try next neighbor */ }
+  }
+  return out;
+}
+
+// Reverse BFS seeded from all ENEMY king footprint cells: dist = steps for
+// `color`'s material to reach a king (shared with the hunt project).
+export function enemyKingDistances(game, color) {
+  const seeds = [];
+  const seen = new Set();
+  for (const b of game.activeBoardNames()) {
+    for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) {
+      const p = game.board(b)[y][x];
+      if (!p || (p.type !== "King" && p.type !== "SuperKing")) continue;
+      const root = game.leader(p);
+      const id = root.group || root.uid;
+      if (seen.has(id) || root.color === color) continue;
+      seen.add(id);
+      for (const kc of game.footprint(root.type, root.x, root.y)) {
+        seeds.push(`${root.board}:${kc.x},${kc.y}`);
+      }
+    }
+  }
+  return reverseBfs(game, seeds);
+}
+
+// Reverse portal edges: travel P:(x,y)->D is directed (stepping onto the
+// portal square teleports), so a backwards BFS from D must step back to P.
+// Forward BFS (invasionDistances) uses live portalDest edges directly.
+function reversePortalEdges(game) {
+  const incoming = new Map(); // `${destBoard}:${x},${y}` -> [portal square keys]
+  for (const b of game.activeBoardNames()) {
+    for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) {
+      const p = game.board(b)[y][x];
+      if (!p || p.type !== "Portal") continue;
+      const dest = portalDest(game, b, x, y);
+      if (!dest || !game.board(dest)) continue;
+      const dk = `${dest}:${x},${y}`;
+      if (!incoming.has(dk)) incoming.set(dk, []);
+      incoming.get(dk).push(`${b}:${x},${y}`);
+    }
+  }
+  return incoming;
+}
+
+function reverseBfs(game, seeds) {
   const dist = new Map();
-  const prev = new Map();
-  const start = `${startBoard}:${startX},${startY}`;
-  dist.set(start, 0);
-  const queue = [start];
+  const queue = [];
+  for (const t of seeds) {
+    if (!dist.has(t)) { dist.set(t, 0); queue.push(t); }
+  }
+  const incoming = reversePortalEdges(game);
   let head = 0;
   while (head < queue.length) {
     const k = queue[head++];
     const d = dist.get(k);
-    const sep = k.indexOf(":");
-    const b = k.slice(0, sep);
-    const [x, y] = k.slice(sep + 1).split(",").map(Number);
+    const { b, x, y } = parseKey(k);
     const step = (nk) => {
       if (dist.has(nk)) return;
       dist.set(nk, d + 1);
-      prev.set(nk, k);
       queue.push(nk);
     };
     for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
@@ -390,12 +410,20 @@ function bfsFrom(game, startBoard, startX, startY) {
       if (x + dx < 0 || x + dx > 7 || y + dy < 0 || y + dy > 7) continue;
       step(`${b}:${x + dx},${y + dy}`);
     }
-    const dest = portalDest(game, b, x, y);
-    if (dest && game.board(dest)) step(`${dest}:${x},${y}`);
+    for (const pk of incoming.get(k) || []) step(pk);
   }
-  return { dist, prev };
+  return dist;
 }
 
+// Reverse BFS seeded from ALL atheism cells: dist(square) = steps to the
+// nearest Atheism footprint cell. Blockers ignored — callers validate steps
+// as real legal moves.
+export function atheismDistances(game) {
+  return reverseBfs(game, atheismCells(game));
+}
+
+// Single-source BFS distances from one piece (king-step adjacency + portal
+// edges, blockers ignored). Returns { dist: Map, prev: Map }.
 // Project step for an armed win: the greedy first action of the verified
 // route, re-planned every turn (stale commitments impossible — armed is
 // re-verified each call). Returns a legal action or null.
@@ -420,36 +448,20 @@ export function invasionProjectStep(game, color) {
     }
   }
 
-  // 2. Walk the shortest route: nearest (piece, atheism cell) by BFS, then
-  // the first step — validated as a real legal move (BFS ignores blockers).
-  let best = null;
-  for (const root of pieces) {
-    // Immobile NPC-ish or huge pieces still fine: validate before returning.
-    const { dist, prev } = bfsFrom(game, root.board, root.x, root.y);
-    const rootKey = `${root.board}:${root.x},${root.y}`;
-    for (const t of cells) {
-      if (!dist.has(t)) continue;
-      if (!best || dist.get(t) < best.d) {
-        const first = firstStepAlong(prev, rootKey, t);
-        if (first) best = { d: dist.get(t), root, first };
-      }
-    }
-  }
-  if (best) {
-    const { b: fb, x: fx, y: fy } = parseKey(best.first);
-    // Same-board step must be a legal move; cross-board first steps only
-    // happen via portal squares, which the engine resolves on arrival.
-    if (fb === best.root.board) {
-      try {
-        if (game.validMove({ x: best.root.x, y: best.root.y }, { x: fx, y: fy }, fb)) {
-          return { action: "move", from: { x: best.root.x, y: best.root.y }, to: { x: fx, y: fy }, board: fb };
-        }
-      } catch { /* fall through to portal buy */ }
-    } else {
-      // First step crosses boards: root must already stand on a portal.
-      // Moving "onto" the portal square re-triggers travel — but root is
-      // already there, so instead nudge: no-op here, try portal buy below.
-    }
+  // 2. Walk downhill: nearest pieces first, any validated same-board step
+  // that shortens reverse-BFS distance to Atheism. Tries every neighbor
+  // (not just the reconstructed ideal step) so blocked ideal lines degrade
+  // to sidesteps instead of giving up. Cross-board first steps (standing on
+  // a portal) have no single-turn move — those fall to the portal buy below.
+  const toAtheism = atheismDistances(game);
+  const ranked = pieces
+    .map(root => ({ root, d: toAtheism.get(`${root.board}:${root.x},${root.y}`) ?? Infinity }))
+    .filter(e => e.d !== Infinity)
+    .sort((a, b) => a.d - b.d)
+    .slice(0, 6);
+  for (const { root } of ranked) {
+    const steps = stepNeighbors(toAtheism, game, root);
+    if (steps.length) return steps[0];
   }
 
   // 3. Sim-verified portal buy that creates a short route (else null).
