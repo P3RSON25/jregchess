@@ -9,10 +9,13 @@ import { loadPolicyNet, policyNetLoaded } from "/shared/policyNet.js";
 let nnStatus = "handcrafted eval";
 // Learned eval is optional: ml/value_v1.json is served at /ml/*.json when
 // training has produced weights. Missing file = silent fallback, no error UI.
-fetch("/ml/value_v1.json", { cache: "no-store" })
-  .then(response => { if (!response.ok) throw new Error("no weights"); return response.json(); })
+fetch("/ml/value_v3.json", { cache: "no-store" })
+  .then(response => { if (!response.ok) throw new Error("no v3"); return response.json(); })
   .then(json => { loadValueNet(json); nnStatus = "neural eval"; renderStatus(); })
-  .catch(() => { nnStatus = "handcrafted eval"; });
+  .catch(() => fetch("/ml/value_v1.json", { cache: "no-store" })
+    .then(response => { if (!response.ok) throw new Error("no weights"); return response.json(); })
+    .then(json => { loadValueNet(json); nnStatus = "neural eval"; renderStatus(); })
+    .catch(() => { nnStatus = "handcrafted eval"; }));
 // Policy v2 (trained on current-strength play) preferred, v1 as fallback.
 fetch("/ml/policy_v2.json", { cache: "no-store" })
   .then(response => { if (!response.ok) throw new Error("no v2"); return response.json(); })

@@ -33,6 +33,8 @@ const EXTRA = {
   adjudicate: args.adjudicate || 0,
   jitterTemp: args.jitterTemp || 0,
   jitterPlies: args.jitterPlies || 0,
+  teacherEvery: args.teacherEvery || 0,
+  teacherTimeMs: args.teacherTimeMs || 4000,
 };
 const JOBS = Math.max(1, Math.min(Number(args.jobs || cpus().length), GAMES));
 

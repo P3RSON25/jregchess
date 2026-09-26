@@ -957,6 +957,7 @@ export function chooseMainAction(game, difficulty = "normal", opts = {}) {
     .map(e => e.a);
   const searchDepth = (depth, width) => {
     let best = ordered[0] || null, bestScore = -Infinity, alpha = -Infinity;
+    const scored = [];
     const narrow = ordered.slice(0, width);
     for (const a of narrow) {
       if (SEARCH_TIMEOUT || Date.now() > SEARCH_DEADLINE) { SEARCH_TIMEOUT = true; break; }
@@ -964,25 +965,65 @@ export function chooseMainAction(game, difficulty = "normal", opts = {}) {
       if (!ok) continue;
       const v = search(sim, depth, alpha, Infinity, color);
       if (SEARCH_TIMEOUT) break;
+      scored.push({ a, v });
       if (v > bestScore) { bestScore = v; best = a; }
       if (v > alpha) alpha = v;
     }
-    return { best, bestScore };
+    return { best, bestScore, scored };
   };
   const d1 = searchDepth(0, 26);
   let best = d1.best;
+  let bestScore = d1.bestScore;
+  let lastScored = d1.scored;
   if (!SEARCH_TIMEOUT && Date.now() < SEARCH_DEADLINE) {
     const d2 = searchDepth(1, 22);
-    if (!SEARCH_TIMEOUT && d2.best) best = d2.best;
+    if (!SEARCH_TIMEOUT && d2.best) { best = d2.best; bestScore = d2.bestScore; lastScored = d2.scored; }
   }
   const wantD3 = opts.depth3 || (logits && !opts.widths);
   if (wantD3 && !SEARCH_TIMEOUT && Date.now() < SEARCH_DEADLINE) {
     if (!opts.widths) SEARCH_WIDTHS = { 1: 14, 2: 10 };
     const d3 = searchDepth(2, 12);
-    if (!SEARCH_TIMEOUT && d3.best) best = d3.best;
+    if (!SEARCH_TIMEOUT && d3.best) { best = d3.best; bestScore = d3.bestScore; lastScored = d3.scored; }
+  }
+  // Value tie-break (opts.valueTiebreak): among deepest-stage candidates
+  // within 80cp of best, nudge by clipped NN sign (magnitude untrusted —
+  // ECE 0.25). Bounded ±120cp, never re-sorts the width, never touches
+  // alpha-beta. Zero-cost unless weights loaded and flag set.
+  if (opts.valueTiebreak && valueNetLoaded() && lastScored.length > 1 && !SEARCH_TIMEOUT) {
+    const close = lastScored.filter(e => bestScore - e.v <= 80).slice(0, 5);
+    if (close.length > 1) {
+      let tbBest = best, tbScore = -Infinity;
+      for (const e of close) {
+        const { sim, ok } = cloneApply(snap, e.a);
+        if (!ok) continue;
+        let bonus = 0;
+        try {
+          const nv = nnBonus(sim, color);
+          bonus = Math.max(-120, Math.min(120, nv * 0.25));
+        } catch { /* ignore */ }
+        if (e.v + bonus > tbScore) { tbScore = e.v + bonus; tbBest = e.a; }
+      }
+      best = tbBest;
+    }
   }
   SEARCH_WIDTHS = null;
+  if (opts.returnScore) return { action: best, score: bestScore };
   return best;
+}
+
+// Teacher label for training: deep/wide search best-move + its score.
+// Stronger than live play (full widths, generous budget); farm workers call
+// this on sampled positions. Returns { action, score } (score may be null).
+export function teacherLabel(game, opts = {}) {
+  if (game.gameOver || game.pendingDecision || game.rulePicker) return { action: null, score: null };
+  const out = chooseMainAction(game, "hard", {
+    timeMs: opts.timeMs ?? 4000,
+    widths: opts.widths ?? { 1: 16, 2: 12, 3: 12 },
+    depth3: true,
+    returnScore: true,
+  });
+  if (!out || !out.action) return { action: null, score: null };
+  return out;
 }
 
 // Full turn plan: free upgrades + (decision | rule | main action).

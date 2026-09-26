@@ -48,6 +48,7 @@ function sideCfg(prefix, fallbackDiff) {
     diff: args[prefix] || fallbackDiff,
     policy: flag(prefix + "Policy"),
     depth3: flag(prefix + "Depth3"),
+    valueTiebreak: flag(prefix + "ValueTiebreak"),
     timeMs: num(prefix + "Time", TIME_MS),
     widths: args[prefix + "Widths"] ? JSON.parse(args[prefix + "Widths"]) : undefined,
   };
@@ -58,6 +59,7 @@ const blackCfg = sideCfg("black", "hard");
 function cfgFor(game, cfg) {
   const opts = { timeMs: cfg.timeMs };
   if (cfg.depth3) { opts.depth3 = true; opts.widths = cfg.widths || { 1: 14, 2: 10, 3: 12 }; }
+  if (cfg.valueTiebreak) opts.valueTiebreak = true;
   return opts;
 }
 

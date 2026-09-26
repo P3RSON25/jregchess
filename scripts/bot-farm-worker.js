@@ -3,14 +3,16 @@
 import { parentPort, workerData } from "node:worker_threads";
 import { readFileSync, existsSync } from "node:fs";
 import { GameState } from "../shared/game.js";
-import { planBotTurn, evaluate } from "../shared/bot.js";
+import { planBotTurn, evaluate, teacherLabel } from "../shared/bot.js";
 import { encodePosition } from "../shared/features.js";
 import { loadPolicyNet, setPolicyColors } from "../shared/policyNet.js";
 
-const { start, count, white, black, every, maxPlies, seedTag, policy, adjudicate, jitterTemp, jitterPlies } = workerData;
+const { start, count, white, black, every, maxPlies, seedTag, policy, adjudicate, jitterTemp, jitterPlies, teacherEvery, teacherTimeMs } = workerData;
 const ADJ_CP = Number(adjudicate || 0);
 const JIT_TEMP = Number(jitterTemp || 0);
 const JIT_PLIES = Number(jitterPlies || 0);
+const TEACHER_EVERY = Number(teacherEvery || 0);
+const TEACHER_MS = Number(teacherTimeMs || 4000);
 
 // New-strength data: both sides use the shipped policy when requested.
 // Value net stays unloaded (per-eval forwards are too slow for selfplay).
@@ -57,7 +59,17 @@ for (let i = 0; i < count; i++) {
       ? planBotTurn(game, diff, { gumbel: JIT_TEMP })
       : planBotTurn(game, diff);
     if (!plan) break;
-    if (plies % every === 0) buf.push(encodePosition(game, plan.action));
+    if (plies % every === 0) {
+      const pos = encodePosition(game, plan.action);
+      // Teacher label: deep search best-move + score (stronger than play).
+      if (TEACHER_EVERY > 0 && plies % TEACHER_EVERY === 0 && !game.pendingDecision && !game.rulePicker) {
+        try {
+          const t = teacherLabel(game, { timeMs: TEACHER_MS });
+          if (t.action) pos.teacher = { action: t.action, score: typeof t.score === "number" ? Math.round(t.score) : null };
+        } catch { /* unlabeled: still useful for value head */ }
+      }
+      buf.push(pos);
+    }
     if (!applyPlan(game, plan)) break;
     plies++;
   }
