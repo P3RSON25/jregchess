@@ -123,6 +123,49 @@ test("P3 anti-hack: disarmed bot prefers treasure over portal spam", () => {
   assert.ok(!plan.kind.startsWith("invasion"));
 });
 
+test("H1: hunt walks the nearest hunter onto the portal", () => {
+  const game = clearBoards(new GameState({ seed: "inv-h1" }));
+  game.placeNew("King", COLORS.WHITE, 0, 0, "Normal");
+  game.placeNew("King", COLORS.BLACK, 4, 4, "Hell");
+  game.placeNew("Rook", COLORS.WHITE, 3, 3, "Normal");
+  game.placeNew("Portal", COLORS.NPC, 3, 4, "Normal", { portalTo: "Hell" });
+  game.whiteGP = 0;
+  finishSetup(game);
+  const plan = planBotTurn(game, "hard", { timeMs: 1000 });
+  assert.ok(plan && plan.action, "bot must have a plan");
+  assert.equal(plan.kind, "hunt:move");
+  assert.deepEqual(plan.action.to, { x: 3, y: 4 });
+});
+
+test("H2: live tactics pre-empt the hunt", () => {
+  const game = clearBoards(new GameState({ seed: "inv-h2" }));
+  game.placeNew("King", COLORS.WHITE, 0, 0, "Normal");
+  game.placeNew("King", COLORS.BLACK, 4, 4, "Hell");
+  game.placeNew("Rook", COLORS.WHITE, 3, 3, "Normal");
+  game.placeNew("Portal", COLORS.NPC, 3, 4, "Normal", { portalTo: "Hell" });
+  game.placeNew("Queen", COLORS.WHITE, 2, 2, "Normal");
+  game.placeNew("Rook", COLORS.BLACK, 2, 3, "Normal");
+  game.whiteGP = 0;
+  finishSetup(game);
+  const plan = planBotTurn(game, "hard", { timeMs: 1000 });
+  assert.ok(plan && plan.action);
+  assert.ok(!plan.kind.startsWith("hunt"), "tactics must pre-empt steering");
+});
+
+test("H3: diffuse king counts stay with search", () => {
+  const game = clearBoards(new GameState({ seed: "inv-h3" }));
+  game.placeNew("King", COLORS.WHITE, 0, 0, "Normal");
+  game.placeNew("King", COLORS.BLACK, 1, 1, "Normal");
+  game.placeNew("King", COLORS.BLACK, 2, 2, "Normal");
+  game.placeNew("King", COLORS.BLACK, 3, 3, "Normal");
+  game.placeNew("Rook", COLORS.WHITE, 5, 5, "Normal");
+  game.whiteGP = 0;
+  finishSetup(game);
+  const plan = planBotTurn(game, "hard", { timeMs: 1000 });
+  assert.ok(plan && plan.action);
+  assert.ok(!plan.kind.startsWith("hunt") && !plan.kind.startsWith("invasion"));
+});
+
 test("P4: disarmed atheism choice never suicides our bunker", () => {
   const game = clearBoards(new GameState({ seed: "inv-p4" }));
   game.placeNew("King", COLORS.WHITE, 4, 6, "Heaven");

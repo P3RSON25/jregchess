@@ -9,6 +9,7 @@
 // Ordering changes which lines get searched; minimax still backs up real
 // valuations. Reward hacking is impossible by construction.
 import { GameState } from "./game.js";
+import { PIECE_VALUES } from "./values.js";
 
 export const ATHEISM_CAPTURE_BONUS = 15000; // below King-take (20000), above all else
 export const PORTAL_ROUTE_BONUS = 3000; // sim-verified route creation only
@@ -153,6 +154,174 @@ export function portalBuyValue(game, x, y, color) {
   return routeLength(sim, color, 2) !== null ? PORTAL_ROUTE_BONUS : 0;
 }
 
+const HUNT_MAX_KINGS = 2; // diffuse king counts stay with search
+const HUNT_TACTICS_MIN = 500; // rook-class takes/own-risk pre-empt steering
+const HUNT_ROUTE_MAX = 6;
+
+const UNHUNTABLE = new Set([
+  "Coin", "Treasure", "Portal", "Landmine", "Bomb", "Pittrap",
+  "Whirlpool", "Void", "Church", "Atheism", "RookTower",
+]);
+
+// Own king currently capturable by anyone? If so, defend via search.
+function ownKingInDanger(game, color) {
+  const seen = new Set();
+  const kings = [];
+  for (const b of game.activeBoardNames()) {
+    for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) {
+      const p = game.board(b)[y][x];
+      if (!p || (p.type !== "King" && p.type !== "SuperKing")) continue;
+      const root = game.leader(p);
+      const id = root.group || root.uid;
+      if (seen.has(id) || root.color !== color) continue;
+      seen.add(id);
+      kings.push(root);
+    }
+  }
+  if (!kings.length) return false;
+  for (const b of game.activeBoardNames()) {
+    for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) {
+      const p = game.board(b)[y][x];
+      if (!p) continue;
+      const root = game.leader(p);
+      if (root.color === color || root.color === "NPC") continue;
+      if (!root.controlledBy && ["Zombie", "WildHorse", "Wildlife", "Meteor"].includes(root.type)) continue;
+      for (const k of kings) {
+        if (k.board !== b) continue;
+        try {
+          if (game.validMove({ x: root.x, y: root.y }, { x: k.x, y: k.y }, b)) return true;
+        } catch { /* ignore */ }
+      }
+    }
+  }
+  return false;
+}
+
+// Any own capture of victim value >= min available right now?
+function bigCaptureAvailable(game, color, min) {
+  for (const root of ownLeaders(game, color)) {
+    let dests = [];
+    try { dests = game.legalMoves({ x: root.x, y: root.y }, root.board); } catch { continue; }
+    for (const to of dests) {
+      const t = game.getCell(to.x, to.y, root.board);
+      if (!t || t.color === color) continue;
+      if ((PIECE_VALUES[game.leader(t).type] ?? 0) >= min) return true;
+    }
+  }
+  return false;
+}
+
+// King-hunt project: route the nearest mobile hunter to the last enemy
+// king(s) via portal-aware BFS, one validated step per turn. Re-planned
+// every turn; yields to tactics (big captures) and defense (own king in
+// danger), and stays out when kings are diffuse. Ordering/steering only —
+// search-grade valuation still comes from minimax on quiet turns.
+export function huntProjectStep(game, color) {
+  // Invasion owns armed wins — unless no Atheism exists to execute them with.
+  if (armedTargets(game, color).length && findAtheisms(game).length) return null;
+  const ledger = kingLedger(game);
+  const enemyKings = [];
+  {
+    const seen = new Set();
+    for (const b of game.activeBoardNames()) {
+      for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) {
+        const p = game.board(b)[y][x];
+        if (!p || (p.type !== "King" && p.type !== "SuperKing")) continue;
+        const root = game.leader(p);
+        const id = root.group || root.uid;
+        if (seen.has(id) || root.color === color) continue;
+        seen.add(id);
+        enemyKings.push(root);
+      }
+    }
+  }
+  if (!enemyKings.length || enemyKings.length > HUNT_MAX_KINGS) return null;
+  if (ledger[color].total === 0) return null;
+  if (bigCaptureAvailable(game, color, HUNT_TACTICS_MIN)) return null;
+  if (ownKingInDanger(game, color)) return null;
+
+  const hunters = ownLeaders(game, color).filter(p => !UNHUNTABLE.has(p.type));
+  let best = null;
+  for (const root of hunters) {
+    const { dist, prev } = bfsFrom(game, root.board, root.x, root.y);
+    const rootKey = `${root.board}:${root.x},${root.y}`;
+    for (const k of enemyKings) {
+      for (const kc of game.footprint(k.type, k.x, k.y)) {
+        const t = `${k.board}:${kc.x},${kc.y}`;
+        if (!dist.has(t) || dist.get(t) > HUNT_ROUTE_MAX) continue;
+        if (!best || dist.get(t) < best.d) {
+          const first = firstStepAlong(prev, rootKey, t);
+          if (first) best = { d: dist.get(t), root, first };
+        }
+      }
+    }
+  }
+  if (best) {
+    const { b: fb, x: fx, y: fy } = parseKey(best.first);
+    if (fb === best.root.board) {
+      try {
+        if (game.validMove({ x: best.root.x, y: best.root.y }, { x: fx, y: fy }, fb)) {
+          return { action: "move", from: { x: best.root.x, y: best.root.y }, to: { x: fx, y: fy }, board: fb };
+        }
+      } catch { /* fall through to portal buy */ }
+    }
+    // Cross-board first step (standing on a portal) has no single-turn move.
+  }
+
+  // No walkable step (usually: another board, no portals): a sim-verified
+  // portal buy that opens a short route. Rare + capped like the invasion buy.
+  if (game.board("Normal") && game.funds() >= 4) {
+    const empties = [];
+    for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) {
+      if (!game.getCell(x, y, "Normal")) empties.push({ x, y, s: -(Math.abs(x - 3.5) + Math.abs(y - 3.5)) });
+    }
+    empties.sort((a, b) => b.s - a.s);
+    for (const s of empties.slice(0, 16)) {
+      let sim = null;
+      try {
+        if (!game.canBuy("portal", s.x, s.y, "Normal")) continue;
+        sim = GameState.fromSnapshot(game.toSnapshot());
+        if (!sim.buy("portal", s.x, s.y, "Normal")) continue;
+      } catch { continue; }
+      const after = huntRouteLength(sim, color);
+      if (after !== null && after <= 4) {
+        return { action: "buy", id: "portal", x: s.x, y: s.y, board: "Normal" };
+      }
+    }
+  }
+  return null;
+}
+
+// Shortest hunter->enemy-king BFS length (same rules as the project step).
+export function huntRouteLength(game, color) {
+  const seen = new Set();
+  const kings = [];
+  for (const b of game.activeBoardNames()) {
+    for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) {
+      const p = game.board(b)[y][x];
+      if (!p || (p.type !== "King" && p.type !== "SuperKing")) continue;
+      const root = game.leader(p);
+      const id = root.group || root.uid;
+      if (seen.has(id) || root.color === color) continue;
+      seen.add(id);
+      kings.push(root);
+    }
+  }
+  if (!kings.length || kings.length > HUNT_MAX_KINGS) return null;
+  const hunters = ownLeaders(game, color).filter(p => !UNHUNTABLE.has(p.type));
+  let best = null;
+  for (const root of hunters) {
+    const { dist } = bfsFrom(game, root.board, root.x, root.y);
+    for (const k of kings) {
+      for (const kc of game.footprint(k.type, k.x, k.y)) {
+        const t = `${k.board}:${kc.x},${kc.y}`;
+        if (dist.has(t) && (best === null || dist.get(t) < best)) best = dist.get(t);
+      }
+    }
+  }
+  return best;
+}
+
 // If the pending decision is atheism and a verified win exists, return the
 // winning choice ('heaven'/'hell'). Otherwise null (heuristics decide).
 export function forcedAtheismChoice(game) {
@@ -177,6 +346,22 @@ function ownLeaders(game, color) {
     }
   }
   return out;
+}
+
+// First node on the BFS path from rootKey toward targetKey (null if the
+// target is the root itself or unreachable in prev).
+function firstStepAlong(prev, rootKey, targetKey) {
+  if (targetKey === rootKey || !prev.has(targetKey)) return null;
+  let cur = targetKey;
+  while (prev.has(cur) && prev.get(cur) !== rootKey) cur = prev.get(cur);
+  return prev.get(cur) === rootKey ? cur : null;
+}
+
+function parseKey(key) {
+  const sep = key.indexOf(":");
+  const b = key.slice(0, sep);
+  const [x, y] = key.slice(sep + 1).split(",").map(Number);
+  return { b, x, y };
 }
 
 // Single-source BFS distances from one piece (king-step adjacency + portal
@@ -241,23 +426,17 @@ export function invasionProjectStep(game, color) {
   for (const root of pieces) {
     // Immobile NPC-ish or huge pieces still fine: validate before returning.
     const { dist, prev } = bfsFrom(game, root.board, root.x, root.y);
+    const rootKey = `${root.board}:${root.x},${root.y}`;
     for (const t of cells) {
       if (!dist.has(t)) continue;
       if (!best || dist.get(t) < best.d) {
-        // Reconstruct first step from root toward t.
-        let cur = t;
-        let first = null;
-        while (prev.has(cur) && prev.get(cur) !== `${root.board}:${root.x},${root.y}`) cur = prev.get(cur);
-        if (prev.get(cur) === `${root.board}:${root.x},${root.y}`) first = cur;
-        else if (cur === `${root.board}:${root.x},${root.y}`) first = null;
+        const first = firstStepAlong(prev, rootKey, t);
         if (first) best = { d: dist.get(t), root, first };
       }
     }
   }
   if (best) {
-    const sep = best.first.indexOf(":");
-    const fb = best.first.slice(0, sep);
-    const [fx, fy] = best.first.slice(sep + 1).split(",").map(Number);
+    const { b: fb, x: fx, y: fy } = parseKey(best.first);
     // Same-board step must be a legal move; cross-board first steps only
     // happen via portal squares, which the engine resolves on arrival.
     if (fb === best.root.board) {

@@ -7,11 +7,12 @@
 // alpha-beta with upgrade closure. Deterministic given GameState RNG state
 // (automover sampling uses the cloned RNG, same as real game).
 import { GameState, SHOP_ITEMS, UPGRADES, RULE_PICKER, COLORS } from "./game.js";
+import { pieceTypeOf, PIECE_VALUES, GP_VALUE, KING_COUNT_BONUS } from "./values.js";
 import { nnBonus } from "./valueNet.js";
 import { policyLogits, policyBonusFor, policyNetLoaded, policyAppliesTo } from "./policyNet.js";
 import {
   armedTargets, findAtheisms, portalBuyValue, forcedAtheismChoice,
-  invasionDistances, invasionProjectStep,
+  invasionDistances, invasionProjectStep, huntProjectStep,
   ATHEISM_CAPTURE_BONUS, PROGRESS_PULL_CAP,
 } from "./invasion.js";
 
@@ -19,31 +20,6 @@ export const BOT_DIFFICULTIES = ["easy", "normal", "hard"];
 
 const SHOP_COST = new Map(SHOP_ITEMS);
 const UPGRADE_FROM = new Map(UPGRADES); // toId -> [fromTypes]
-function pieceTypeOf(id) {
-  return id.split("-").map(w => w[0].toUpperCase() + w.slice(1)).join("");
-}
-
-// Centipawn-ish values. Kings dominate because victory = capture ALL enemy
-// King/SuperKing on ALL surviving boards. GP weight ~= 50 (pawn costs 2GP=100).
-const PIECE_VALUES = {
-  Pawn: 100, Knight: 320, Bishop: 340, Rook: 500, Queen: 950,
-  King: 6000, SuperKing: 7500,
-  Centaur: 360, Unicorn: 380, TrojanHorse: 260,
-  RookKnight: 620, BishopKnight: 620, Necromancer: 720,
-  SuperBishop: 520, BallQueen: 1150, KnightQueen: 1350,
-  AngryRook: 680, RookTower: 350, SuicideBomber: 240, Jester: 320,
-  Zebra: 460, Giraffe: 360,
-  // Controlled wild pieces fight as King-step pieces + deny automovers.
-  Zombie: 120, WildHorse: 150, Wildlife: 110,
-  Meteor: 60,
-  Coin: 170, Treasure: 550,
-  Portal: 90, Landmine: 120, Bomb: 300, Pittrap: 40, Whirlpool: 0, Void: 0,
-  Church: 0, Angel: 500, Atheism: 200, Devil: 300, AggroAngel: 450, AggroDevil: 900,
-  Placeholder: 0,
-};
-
-const GP_VALUE = 50;
-const KING_COUNT_BONUS = 6000; // per net king, on top of piece values
 
 function opp(color) {
   return color === COLORS.WHITE ? COLORS.BLACK : COLORS.WHITE;
@@ -1018,6 +994,10 @@ export function planBotTurn(game, difficulty = "normal", opts = {}) {
     let step = null;
     try { step = invasionProjectStep(node, nodeColor); } catch { step = null; }
     if (step) return { upgrades, action: step, kind: `invasion:${step.action}` };
+    // King-hunt project: forced wins handled above; here steer the nearest
+    // hunter at a diffuse-but-small king count when tactics are quiet.
+    try { step = huntProjectStep(node, nodeColor); } catch { step = null; }
+    if (step) return { upgrades, action: step, kind: `hunt:${step.action}` };
   }
   const main = chooseMainAction(node, difficulty, opts);
   if (!main && !upgrades.length) return null;
