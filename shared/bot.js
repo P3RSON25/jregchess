@@ -579,7 +579,20 @@ function isKingCapture(game, action) {
   } catch { return false; }
 }
 
+// Time-capped search: iterative deepening aborts cleanly and keeps best-so-far,
+// so chaotic midgames can never freeze the browser tab.
+let SEARCH_DEADLINE = 0;
+let SEARCH_NODES = 0;
+let SEARCH_TIMEOUT = false;
+export function searchStats() { return { nodes: SEARCH_NODES, timeout: SEARCH_TIMEOUT }; }
+function tickNode() {
+  SEARCH_NODES++;
+  if ((SEARCH_NODES & 31) === 0 && Date.now() > SEARCH_DEADLINE) SEARCH_TIMEOUT = true;
+  return SEARCH_TIMEOUT;
+}
+
 function search(game, depth, alpha, beta, perspective, isRoot = false, qdepth = 2) {
+  if (SEARCH_TIMEOUT) return evaluate(game, perspective);
   if (game.gameOver) return evaluate(game, perspective);
   if (game.pendingDecision) {
     // Forced chance-ish node: only one sensible choice per heuristic in search.
@@ -666,23 +679,27 @@ function search(game, depth, alpha, beta, perspective, isRoot = false, qdepth = 
   if (maximizing) {
     best = -Infinity;
     for (const a of actions) {
+      if (tickNode()) break;
       const { sim, ok } = cloneApply(snap, a);
       if (!ok) continue;
       const v = search(sim, depth - 1, alpha, beta, perspective, false, qdepth);
       if (v > best) best = v;
       if (v > alpha) alpha = v;
       if (beta <= alpha) break;
+      if (SEARCH_TIMEOUT) break;
     }
     if (best === -Infinity) return evaluate(node, perspective);
   } else {
     best = Infinity;
     for (const a of actions) {
+      if (tickNode()) break;
       const { sim, ok } = cloneApply(snap, a);
       if (!ok) continue;
       const v = search(sim, depth - 1, alpha, beta, perspective, false, qdepth);
       if (v < best) best = v;
       if (v < beta) beta = v;
       if (beta <= alpha) break;
+      if (SEARCH_TIMEOUT) break;
     }
     if (best === Infinity) return evaluate(node, perspective);
   }
@@ -691,12 +708,14 @@ function search(game, depth, alpha, beta, perspective, isRoot = false, qdepth = 
   return best;
 }
 
-export function chooseMainAction(game, difficulty = "normal") {
+export const BOT_TIME_BUDGET_MS = { easy: 50, normal: 150, hard: 450 };
+export function chooseMainAction(game, difficulty = "normal", opts = {}) {
   const color = game.currentColor();
   const moves = enumerateMoves(game, 300);
   const buys = enumerateBuys(game, difficulty === "hard" ? 36 : 24);
   const all = [...moves, ...buys];
   if (!all.length) return null;
+  const timeBudget = opts.timeMs ?? BOT_TIME_BUDGET_MS[difficulty] ?? 150;
   if (difficulty === "easy") {
     // Mostly greedy with frequent blunders so beginners can win.
     if (Math.random() < 0.3) return all[Math.floor(Math.random() * all.length)];
@@ -722,21 +741,37 @@ export function chooseMainAction(game, difficulty = "normal") {
     }
     return best || all[0];
   }
-  // hard: depth-2 alpha-beta over pruned actions.
+  // hard: iterative-deepening depth-1 then depth-2 alpha-beta, time-capped.
+  // Depth 1 always completes (fast); depth 2 refines if budget remains.
+  // On timeout the depth-1 best is returned, so the tab never freezes.
   clearTT();
+  SEARCH_NODES = 0; SEARCH_TIMEOUT = false;
+  SEARCH_DEADLINE = Date.now() + timeBudget;
   const snap = game.toSnapshot();
   const ordered = all
     .map(a => ({ a, s: staticScoreForOrdering(game, a, color) }))
     .sort((x, y) => y.s - x.s)
     .slice(0, 26)
     .map(e => e.a);
-  let best = ordered[0] || null, bestScore = -Infinity, alpha = -Infinity;
-  for (const a of ordered) {
-    const { sim, ok } = cloneApply(snap, a);
-    if (!ok) continue;
-    const v = search(sim, 1, alpha, Infinity, color);
-    if (v > bestScore) { bestScore = v; best = a; }
-    if (v > alpha) alpha = v;
+  const searchDepth = (depth, width) => {
+    let best = ordered[0] || null, bestScore = -Infinity, alpha = -Infinity;
+    const narrow = ordered.slice(0, width);
+    for (const a of narrow) {
+      if (SEARCH_TIMEOUT || Date.now() > SEARCH_DEADLINE) { SEARCH_TIMEOUT = true; break; }
+      const { sim, ok } = cloneApply(snap, a);
+      if (!ok) continue;
+      const v = search(sim, depth, alpha, Infinity, color);
+      if (SEARCH_TIMEOUT) break;
+      if (v > bestScore) { bestScore = v; best = a; }
+      if (v > alpha) alpha = v;
+    }
+    return { best, bestScore };
+  };
+  const d1 = searchDepth(0, 26);
+  let best = d1.best;
+  if (!SEARCH_TIMEOUT && Date.now() < SEARCH_DEADLINE) {
+    const d2 = searchDepth(1, 22);
+    if (!SEARCH_TIMEOUT && d2.best) best = d2.best;
   }
   return best;
 }
@@ -744,7 +779,7 @@ export function chooseMainAction(game, difficulty = "normal") {
 // Full turn plan: free upgrades + (decision | rule | main action).
 // Returns { upgrades: [], action: mainAction|null, kind } for the UI layer to
 // apply sequentially (upgrades first since they don't flip the turn).
-export function planBotTurn(game, difficulty = "normal") {
+export function planBotTurn(game, difficulty = "normal", opts = {}) {
   if (game.gameOver) return null;
   if (game.pendingDecision) {
     const choice = chooseDecision(game);
@@ -767,7 +802,7 @@ export function planBotTurn(game, difficulty = "normal") {
       return { upgrades, action: null, kind: "upgrade-only" };
     }
   }
-  const main = chooseMainAction(node, difficulty);
+  const main = chooseMainAction(node, difficulty, opts);
   if (!main && !upgrades.length) return null;
   return { upgrades, action: main, kind: main ? main.action : "upgrade-only" };
 }
