@@ -4,6 +4,7 @@ import { GameState, COLORS } from "../shared/game.js";
 import {
   enumerateMoves, enumerateBuys, enumerateUpgrades, planUpgrades,
   chooseDecision, chooseRule, chooseMainAction, planBotTurn, evaluate,
+  __internal as botInternal,
 } from "../shared/bot.js";
 
 function applyAction(game, action) {
@@ -109,4 +110,27 @@ test("bot buy candidates respect GP and Normal-only placement", () => {
     assert.equal(b.board, "Normal");
     assert.equal(game.canBuy(b.id, b.x, b.y, "Normal"), true);
   }
+});
+
+test("search survives a rejected Angel release on a crowded board", () => {
+  // Regression: chooseDecision picked angel-"yes" with no 2x2 room, the engine
+  // rejected it, and search retried the same state forever (stack overflow).
+  const game = new GameState({ seed: "bot-crowded" });
+  game.initializing = true;
+  for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) {
+    if (!game.getCell(x, y, "Normal")) game.placeNew("Pawn", x % 2 ? COLORS.WHITE : COLORS.BLACK, x, y, "Normal");
+  }
+  game.placeNew("King", COLORS.WHITE, 0, 0, "Heaven");
+  game.placeNew("King", COLORS.BLACK, 7, 7, "Hell");
+  const angel = game.leader(game.getCell(1, 1, "Heaven"));
+  game.initializing = false;
+  game.whiteToMove = true;
+  // No 2x2 room left on Normal: release must be impossible.
+  assert.equal(botInternal.hasRoomFor(game, "AggroAngel"), false);
+  game.queueDecision("angel", angel);
+  assert.ok(game.pendingDecision);
+  // Heuristic must avoid the doomed "yes", and search must terminate.
+  assert.equal(chooseDecision(game), "no");
+  const value = botInternal.search(game, 1, -Infinity, Infinity, COLORS.WHITE);
+  assert.ok(Number.isFinite(value));
 });

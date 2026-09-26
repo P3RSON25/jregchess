@@ -391,6 +391,9 @@ export function chooseDecision(game) {
   if (d.type === "angel") {
     // AggroAngel wind shoves every non-large piece randomly — good when
     // behind/chaotic or when we hold large-immune pieces; else keep 2nd life.
+    // "yes" needs an empty 2x2 on Normal; without room the engine rejects it,
+    // so check first (non-RNG scan — findEmpty would consume game RNG).
+    if (!hasRoomFor(game, "AggroAngel")) return "no";
     const diff = evaluate(game, color);
     // Behind => gamble on wind. Ahead => keep Angel body.
     return diff < -200 ? "yes" : "no";
@@ -598,13 +601,23 @@ function search(game, depth, alpha, beta, perspective, isRoot = false, qdepth = 
   if (SEARCH_TIMEOUT) return evaluate(game, perspective);
   if (game.gameOver) return evaluate(game, perspective);
   if (game.pendingDecision) {
-    // Forced chance-ish node: only one sensible choice per heuristic in search.
+    // Forced chance-ish node: heuristic choice first, then every legal
+    // fallback. A rejected choice (e.g. Aggro release with no 2x2 room on a
+    // crowded Normal) must NEVER retry the same state — that was an infinite
+    // recursion that crashed hard search via stack overflow.
+    const type = game.pendingDecision.type;
+    const all = type === "angel" ? ["yes", "no"]
+      : type === "atheism" ? ["heaven", "hell", "metaphysical"]
+      : ["release", "gold", "remove", "smite"];
+    const prefs = [chooseDecision(game)];
+    for (const c of all) if (!prefs.includes(c)) prefs.push(c);
     const snap = game.toSnapshot();
-    const sim = GameState.fromSnapshot(snap);
-    const choice = chooseDecision(sim);
-    if (!choice) return evaluate(game, perspective);
-    sim.decision(choice);
-    return search(sim, depth, alpha, beta, perspective, false, qdepth);
+    for (const choice of prefs) {
+      if (!choice) continue;
+      const sim = GameState.fromSnapshot(snap);
+      if (sim.decision(choice)) return search(sim, depth, alpha, beta, perspective, false, qdepth);
+    }
+    return evaluate(game, perspective);
   }
   if (game.rulePicker) {
     const snap = game.toSnapshot();
@@ -810,4 +823,12 @@ export function planBotTurn(game, difficulty = "normal", opts = {}) {
   return { upgrades, action: main, kind: main ? main.action : "upgrade-only" };
 }
 
-export const __internal = { countKings, kingsPerBoard, kingPositions, evaluateRaw: evaluate };
+function hasRoomFor(game, type) {
+  if (!game.board("Normal")) return false;
+  for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) {
+    if (game.footprintClear(type, x, y, "Normal")) return true;
+  }
+  return false;
+}
+
+export const __internal = { countKings, kingsPerBoard, kingPositions, evaluateRaw: evaluate, search, hasRoomFor };
