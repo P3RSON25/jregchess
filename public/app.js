@@ -1,6 +1,7 @@
 import {
   GameState, COLORS, LARGE_SIZES, RULE_DESCRIPTIONS, RULE_ICONS, RULE_PICKER, SHOP_ITEMS, UPGRADES, imageKey
 } from "/shared/game.js";
+import { planBotTurn } from "/shared/bot.js";
 
 const $ = selector => document.querySelector(selector);
 const menu = $("#menu");
@@ -22,25 +23,99 @@ let lastEventId = 0;
 let eventTimer = null;
 let roomConnections = { white: false, black: false };
 let viewBoard = "Normal";
+let botGame = false;
+let botColor = null;
+let botDifficulty = "normal";
+let botThinking = false;
 
 function currentColor() { return game?.whiteToMove ? COLORS.WHITE : COLORS.BLACK; }
 function playerColor() { return localRole === "white" ? COLORS.WHITE : localRole === "black" ? COLORS.BLACK : null; }
-function canAct() { return localRole === "offline" || playerColor() === currentColor(); }
+function isBotTurn() {
+  if (!botGame || !game || game.gameOver) return false;
+  if (game.pendingDecision) return game.pendingDecision.color === botColor;
+  if (game.rulePicker) return game.rulePickerColor === botColor;
+  return currentColor() === botColor;
+}
+function canAct() {
+  if (botGame) return !isBotTurn() && !botThinking;
+  return localRole === "offline" || playerColor() === currentColor();
+}
 function isOnline() { return localRole === "white" || localRole === "black" || localRole === "spectator"; }
-function canPickRule() { return localRole !== "spectator" && (!isOnline() || game?.rulePickerColor === playerColor()); }
-function isMirrored() { return localRole === "black"; }
+function canPickRule() {
+  if (botGame) return !isBotTurn() && !botThinking && game?.rulePickerColor !== botColor;
+  return localRole !== "spectator" && (!isOnline() || game?.rulePickerColor === playerColor());
+}
+function isMirrored() { return localRole === "black" || (botGame && botColor === COLORS.WHITE); }
 function displayCoordinate(x, y) { return isMirrored() ? { x: 7 - x, y: 7 - y } : { x, y }; }
 function gameCoordinate(x, y) { return displayCoordinate(x, y); }
 
 function showGame() {
   menu.classList.add("hidden"); gameScreen.classList.remove("hidden");
-  $("#mode-badge").textContent = isOnline() ? "ONLINE" : "OFFLINE";
+  $("#mode-badge").textContent = isOnline() ? "ONLINE" : botGame ? "BOT" : "OFFLINE";
   $("#multiplayer-card").classList.toggle("hidden", !isOnline());
   render();
+  maybeBotMove();
 }
 
 function startOffline() {
-  localRole = "offline"; room = null; token = null; connected = true; viewBoard = "Normal"; game = new GameState({ mode: "offline" }); selected = null; pendingTool = null; showGame();
+  localRole = "offline"; room = null; token = null; connected = true; viewBoard = "Normal"; botGame = false; botColor = null; botThinking = false; game = new GameState({ mode: "offline" }); selected = null; pendingTool = null; showGame();
+}
+
+function startBot() {
+  const difficulty = $("#bot-difficulty")?.value || "normal";
+  const humanColor = $("#bot-color")?.value || "White";
+  botDifficulty = ["easy", "normal", "hard"].includes(difficulty) ? difficulty : "normal";
+  botColor = humanColor === "White" ? COLORS.BLACK : COLORS.WHITE;
+  localRole = "offline"; room = null; token = null; connected = true; viewBoard = "Normal";
+  botGame = true; botThinking = false;
+  game = new GameState({ mode: "offline" }); selected = null; pendingTool = null; showGame();
+  maybeBotMove();
+}
+
+function maybeBotMove() {
+  if (!botGame || !game || game.gameOver || botThinking) return;
+  if (!isBotTurn()) return;
+  botThinking = true;
+  render();
+  // Let the UI paint "Bot is thinking" before the synchronous search runs.
+  setTimeout(() => {
+    try {
+      runBotTurn();
+    } finally {
+      botThinking = false;
+      render();
+      // Chain: bot upgrades don't flip turn, decisions/rules may leave bot to move again.
+      if (isBotTurn()) maybeBotMove();
+    }
+  }, 60);
+}
+
+function runBotTurn() {
+  if (!game || game.gameOver) return;
+  // Bot may need to answer a decision/rule even when it is not the chess turn.
+  // planBotTurn handles decision/rule/move+upgrade closure in priority order.
+  const plan = planBotTurn(game, botDifficulty);
+  if (!plan) return;
+  for (const upgrade of plan.upgrades || []) {
+    if (game.gameOver || game.pendingDecision || game.rulePicker) break;
+    if (game.currentColor() !== botColor) break;
+    applyLocal({ action: "upgrade", id: upgrade.id, x: upgrade.x, y: upgrade.y, board: upgrade.board });
+  }
+  if (!plan.action) return;
+  const action = plan.action;
+  if (action.action === "decision") {
+    if (game.pendingDecision?.color === botColor) applyLocal({ action: "decision", choice: action.choice });
+  } else if (action.action === "rule") {
+    if (game.rulePicker && game.rulePickerColor === botColor) applyLocal({ action: "rule", rule: action.rule });
+  } else if (action.action === "move") {
+    if (!game.gameOver && !game.pendingDecision && !game.rulePicker && game.currentColor() === botColor) {
+      applyLocal({ action: "move", from: action.from, to: action.to, board: action.board });
+    }
+  } else if (action.action === "buy") {
+    if (!game.gameOver && !game.pendingDecision && !game.rulePicker && game.currentColor() === botColor) {
+      applyLocal({ action: "buy", id: action.id, x: action.x, y: action.y, board: action.board });
+    }
+  }
 }
 
 function openSocket(onOpen) {
@@ -54,6 +129,7 @@ function openSocket(onOpen) {
 }
 
 function startCreate() {
+  botGame = false; botColor = null; botThinking = false;
   localRole = "white";
   openSocket(() => socket.send(JSON.stringify({ type: "create" })));
 }
@@ -61,6 +137,7 @@ function startCreate() {
 function startJoin() {
   const code = window.prompt("Enter join code:");
   if (!code) return;
+  botGame = false; botColor = null; botThinking = false;
   localRole = "black";
   openSocket(() => {
     const saved = localStorage.getItem(`jreg-chess:${code.trim().toLowerCase()}`);
@@ -104,6 +181,7 @@ function applyLocal(action) {
   if (!accepted && game.lastEvent) displayEvent(game.lastEvent);
   else if (game.lastEvent?.id > lastEventId) { lastEventId = game.lastEvent.id; displayEvent(game.lastEvent); }
   render();
+  maybeBotMove();
 }
 
 function squareClass(boardName, x, y) {
@@ -120,9 +198,9 @@ function render() {
   if (!game) return;
   if (!game.board(viewBoard)) viewBoard = game.activeBoardNames()[0] || "Normal";
   const boardName = viewBoard;
-  $("#game-title").textContent = game.draw ? "Draw" : game.gameOver ? `${game.winner} wins` : `${game.whiteToMove ? "White" : "Black"} to move`;
+  $("#game-title").textContent = game.draw ? "Draw" : game.gameOver ? `${game.winner} wins` : botThinking ? `Bot (${botColor}) is thinking...` : `${game.whiteToMove ? "White" : "Black"} to move`;
   $("#board-name").textContent = boardName;
-  $("#side-label").textContent = localRole === "offline" ? `${game.whiteToMove ? "White" : "Black"}'s side` : localRole === "spectator" ? "Spectator" : `${localRole[0].toUpperCase() + localRole.slice(1)}'s side`;
+  $("#side-label").textContent = botGame ? `You play ${botColor === COLORS.WHITE ? COLORS.BLACK : COLORS.WHITE} · Bot ${botDifficulty}` : localRole === "offline" ? `${game.whiteToMove ? "White" : "Black"}'s side` : localRole === "spectator" ? "Spectator" : `${localRole[0].toUpperCase() + localRole.slice(1)}'s side`;
   $("#money-label").innerHTML = `White GP: ${game.whiteGP}<br>Black GP: ${game.blackGP}`;
   $("#room-code").textContent = room || "-----";
   $("#draw-offer-button").disabled = !isOnline() || localRole === "spectator" || game.gameOver || Boolean(game.drawOffer);
@@ -165,7 +243,7 @@ function render() {
     renderedGroups.add(piece.group);
     renderLargePiece(pieceLayer, piece, board);
   }
-  $("#selection-status").textContent = game.rulePicker ? (canPickRule() ? "Pick a rule" : `${game.rulePickerColor} picks a rule`) : pendingTool ? `${pendingTool.kind === "buy" ? "Place" : "Upgrade"}: ${pendingTool.id}` : selected ? (canAct() ? "Choose a destination" : "Analyzing position") : canAct() ? "Select a piece" : "Waiting for opponent";
+  $("#selection-status").textContent = botThinking && isBotTurn() ? `Bot (${botColor}) is thinking...` : game.rulePicker ? (canPickRule() ? "Pick a rule" : `${game.rulePickerColor} picks a rule${botGame && game.rulePickerColor === botColor ? " (bot)" : ""}`) : pendingTool ? `${pendingTool.kind === "buy" ? "Place" : "Upgrade"}: ${pendingTool.id}` : selected ? (canAct() ? "Choose a destination" : "Analyzing position") : canAct() ? "Select a piece" : botGame ? "Waiting for bot..." : "Waiting for opponent";
   renderModalState();
 }
 
@@ -215,7 +293,9 @@ function renderLargePiece(layer, piece, board) {
 
 function handleTile(x, y) {
   if (!game || game.pendingDecision || localRole === "spectator") return;
+  if (botGame && (botThinking || isBotTurn())) return;
   if (game.rulePicker && canPickRule()) return;
+  if (botGame && game.rulePicker && game.rulePickerColor === botColor) return;
   const gamePosition = gameCoordinate(x, y);
   if (!canAct() || game.gameOver || game.rulePicker) {
     const clicked = game.getCell(gamePosition.x, gamePosition.y, viewBoard);
@@ -258,7 +338,8 @@ function cycleViewBoard() {
 
 function renderStatus() {
   const status = $("#connection-status");
-  if (!isOnline()) status.textContent = "Local hot-seat";
+  if (botGame) status.textContent = `Bot game (${botDifficulty})`;
+  else if (!isOnline()) status.textContent = "Local hot-seat";
   else if (!connected) status.textContent = "Disconnected";
   else status.textContent = localRole === "spectator" ? "Spectating" : `Player ${localRole}`;
   if (room && game) {
@@ -347,11 +428,12 @@ function renderModalState() {
   if (modalRoot.dataset.kind === "decision" && (!game.pendingDecision || String(game.pendingDecision.id) !== modalRoot.dataset.decisionId)) closeModal();
   if (modalRoot.dataset.kind === "rule-picker" && (!game.rulePicker || !canPickRule())) closeModal();
   if (game.pendingDecision) {
-    const ownsDecision = !isOnline() || game.pendingDecision.color === playerColor();
+    const ownsDecision = botGame ? game.pendingDecision.color !== botColor : !isOnline() || game.pendingDecision.color === playerColor();
     if (ownsDecision && modalRoot.dataset.kind !== "decision") showDecision(game.pendingDecision);
     return;
   }
   if (game.rulePicker) {
+    if (botGame && game.rulePickerColor === botColor) return;
     if (canPickRule() && modalRoot.dataset.kind !== "rule-picker") return showRulePicker();
     return;
   }
@@ -382,6 +464,7 @@ function toast(message) {
 }
 
 $("#offline-button").addEventListener("click", startOffline);
+$("#bot-button").addEventListener("click", startBot);
 $("#create-button").addEventListener("click", startCreate);
 $("#join-button").addEventListener("click", startJoin);
 $("#shop-button").addEventListener("click", showShop);

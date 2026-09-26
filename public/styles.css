@@ -20,7 +20,8 @@ body { margin: 8px; min-width: 320px; }
 .menu-card { width: min(100%, 430px); }
 .menu-card h1 { margin: 8px 0; font-size: 32px; font-weight: 400; }
 .menu-subtitle { margin: 0 0 16px; }
-.menu-actions { display: flex; flex-direction: column; align-items: flex-start; }
+.menu-actions { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
+.bot-options { display: flex; gap: 12px; font: 12px Arial, sans-serif; color: var(--muted); }
 .license-note { margin: 16px 0 0; color: var(--muted); font-size: 11px; }
 
 .game-screen { padding: 8px 0 24px; }
