@@ -7,6 +7,7 @@
     "start": "node server.js",
     "test": "node --test",
     "test:browser": "node scripts/check-ui.js",
+    "test:bot": "node scripts/check-bot.js",
     "bot:bench": "node scripts/bot-bench.js",
     "bot:selfplay": "node scripts/bot-selfplay.js",
     "bot:farm": "node scripts/bot-farm.js",

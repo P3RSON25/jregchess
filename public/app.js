@@ -1,6 +1,7 @@
 import {
   GameState, COLORS, LARGE_SIZES, RULE_DESCRIPTIONS, RULE_ICONS, RULE_PICKER, SHOP_ITEMS, UPGRADES, imageKey
 } from "/shared/game.js";
+import { BOT_TIME_BUDGET_MS } from "/shared/bot.js";
 import { planBotTurn } from "/shared/bot.js";
 import { loadValueNet, valueNetLoaded } from "/shared/valueNet.js";
 import { loadPolicyNet, policyNetLoaded } from "/shared/policyNet.js";
@@ -75,11 +76,19 @@ function showGame() {
   maybeBotMove();
 }
 
+function resetBotWorker() {
+  try { botWorker?.terminate(); } catch { /* ignore */ }
+  botWorker = null;
+  invalidateBotQueue();
+}
+
 function startOffline() {
+  resetBotWorker();
   localRole = "offline"; room = null; token = null; connected = true; viewBoard = "Normal"; botGame = false; botColor = null; botThinking = false; game = new GameState({ mode: "offline" }); selected = null; pendingTool = null; showGame();
 }
 
 function startBot() {
+  resetBotWorker();
   const difficulty = $("#bot-difficulty")?.value || "normal";
   const humanColor = $("#bot-color")?.value || "White";
   botDifficulty = ["easy", "normal", "hard"].includes(difficulty) ? difficulty : "normal";
@@ -90,22 +99,141 @@ function startBot() {
   maybeBotMove();
 }
 
+let botWorker = null;
+let botRequestId = 0;
+let botWatchdog = null;
+let applyingPlan = false;
+
+function invalidateBotQueue() {
+  botRequestId++;
+  clearTimeout(botWatchdog);
+  applyingPlan = false;
+}
+
+function getBotWorker() {
+  if (botWorker || typeof Worker === "undefined") return botWorker;
+  try {
+    botWorker = new Worker("/bot-worker.js", { type: "module" });
+    botWorker.addEventListener("message", handleBotWorkerMessage);
+    botWorker.addEventListener("error", () => { botWorker = null; });
+  } catch {
+    botWorker = null;
+  }
+  return botWorker;
+}
+
 function maybeBotMove() {
-  if (!botGame || !game || game.gameOver || botThinking) return;
+  if (!botGame || !game || game.gameOver || botThinking || applyingPlan) return;
   if (!isBotTurn()) return;
   botThinking = true;
   render();
-  // Let the UI paint "Bot is thinking" before the synchronous search runs.
+  const worker = getBotWorker();
+  if (worker) {
+    // Async path: search runs off the main thread; the board stays alive.
+    const id = ++botRequestId;
+    const snapshot = game.toSnapshot();
+    const watchdogMs = (BOT_TIME_BUDGET_MS?.[botDifficulty] ?? 450) + 8000;
+    clearTimeout(botWatchdog);
+    botWatchdog = setTimeout(() => {
+      // Worker stall: drop it and finish synchronously so play never hangs.
+      try { botWorker?.terminate(); } catch { /* ignore */ }
+      botWorker = null;
+      if (id !== botRequestId) return;
+      finishBotTurn(null);
+    }, watchdogMs);
+    try {
+      worker.postMessage({ id, snapshot, difficulty: botDifficulty, opts: {} });
+      return;
+    } catch {
+      clearTimeout(botWatchdog);
+      botWorker = null;
+      // fall through to synchronous fallback
+    }
+  }
+  // Synchronous fallback (no Worker support, or post failed).
   setTimeout(() => {
+    if (!botThinking) return;
     try {
       runBotTurn();
     } finally {
       botThinking = false;
       render();
-      // Chain: bot upgrades don't flip turn, decisions/rules may leave bot to move again.
       if (isBotTurn()) maybeBotMove();
     }
   }, 60);
+}
+
+function handleBotWorkerMessage(event) {
+  const { id, ok, plan } = event.data || {};
+  if (id !== botRequestId) return; // stale (new game started)
+  clearTimeout(botWatchdog);
+  if (!botThinking) return;
+  finishBotTurn(ok ? plan : null);
+}
+
+function finishBotTurn(plan) {
+  // Applies a worker plan through the same guarded path as sync search.
+  // Null plan (worker failure/timeout) falls back to a synchronous think.
+  botThinking = false;
+  applyingPlan = true;
+  try {
+    applyBotPlan(plan);
+  } finally {
+    applyingPlan = false;
+  }
+  render();
+  // Chain: upgrades don't flip turn, decisions/rules may leave bot to move.
+  if (isBotTurn()) maybeBotMove();
+}
+
+function applyBotPlan(plan) {
+  if (!plan) {
+    render();
+    if (!botGame || !game || game.gameOver) return;
+    if (!isBotTurn()) return;
+    botThinking = true;
+    render();
+    setTimeout(() => {
+      try {
+        runBotTurn();
+      } finally {
+        botThinking = false;
+        render();
+        if (isBotTurn()) maybeBotMove();
+      }
+    }, 60);
+    return;
+  }
+  for (const upgrade of plan.upgrades || []) {
+    if (!game || game.gameOver || game.pendingDecision || game.rulePicker) break;
+    if (game.currentColor() !== botColor) break;
+    applyLocalSilent({ action: "upgrade", id: upgrade.id, x: upgrade.x, y: upgrade.y, board: upgrade.board });
+  }
+  if (plan.action) applyBotAction(plan.action);
+}
+
+function applyLocalSilent(action) {
+  // Worker-plan application without re-triggering the bot loop per step;
+  // finishBotTurn chains exactly once at the end.
+  if (action.action === "upgrade") game.upgrade(action.id, action.x, action.y, action.board || viewBoard);
+  else applyLocal(action);
+}
+
+function applyBotAction(action) {
+  if (!game || game.gameOver) return;
+  if (action.action === "decision") {
+    if (game.pendingDecision?.color === botColor) applyLocal({ action: "decision", choice: action.choice });
+  } else if (action.action === "rule") {
+    if (game.rulePicker && game.rulePickerColor === botColor) applyLocal({ action: "rule", rule: action.rule });
+  } else if (action.action === "move") {
+    if (!game.gameOver && !game.pendingDecision && !game.rulePicker && game.currentColor() === botColor) {
+      applyLocal({ action: "move", from: action.from, to: action.to, board: action.board });
+    }
+  } else if (action.action === "buy") {
+    if (!game.gameOver && !game.pendingDecision && !game.rulePicker && game.currentColor() === botColor) {
+      applyLocal({ action: "buy", id: action.id, x: action.x, y: action.y, board: action.board });
+    }
+  }
 }
 
 function runBotTurn() {
@@ -147,6 +275,7 @@ function openSocket(onOpen) {
 }
 
 function startCreate() {
+  resetBotWorker();
   botGame = false; botColor = null; botThinking = false;
   localRole = "white";
   openSocket(() => socket.send(JSON.stringify({ type: "create" })));
@@ -155,6 +284,7 @@ function startCreate() {
 function startJoin() {
   const code = window.prompt("Enter join code:");
   if (!code) return;
+  resetBotWorker();
   botGame = false; botColor = null; botThinking = false;
   localRole = "black";
   openSocket(() => {
